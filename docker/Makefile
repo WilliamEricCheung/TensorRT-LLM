@@ -75,6 +75,7 @@ endef
 		$(if $(STAGE), --target $(STAGE)) \
 		--file Dockerfile.multi \
 		--tag $(IMAGE_WITH_TAG) \
+		--network host \
 		..
 
 %_user:
@@ -96,7 +97,7 @@ endef
 	@echo "Pulling docker image: $(IMAGE_WITH_TAG)"
 	docker pull $(IMAGE_WITH_TAG)
 
-DOCKER_RUN_OPTS   ?= --rm -it --ipc=host --ulimit memlock=-1 --ulimit stack=67108864
+DOCKER_RUN_OPTS   ?= -itd --ipc=host --ulimit memlock=-1 --ulimit stack=67108864
 DOCKER_RUN_ARGS   ?=
 GPU_OPTS          ?= --gpus=all
 SOURCE_DIR        ?= $(shell readlink -f ..)
@@ -106,6 +107,14 @@ RUN_CMD           ?=
 CONTAINER_NAME    ?= tensorrt_llm
 WORK_DIR          ?= $(CODE_DIR)
 DOCKER_PULL       ?= 0
+
+# 定义MODEL_DIR
+# 我将chatglm3-6b放在了与TensorRT-LLM同级的目录下，所以SOURCE_MODEL_DIR的值为TensorRT-LLM的父目录下的chatglm3-6b的绝对路径
+SOURCE_MODEL_DIR  ?= $(SOURCE_DIR)/../chatglm3-6b
+# 然后获取其绝对路径
+SOURCE_MODEL_DIR_ABS := $(shell readlink -f $(SOURCE_MODEL_DIR))
+# 映射到/code/tensorrt_llm/examples/chatglm/chatglm3_6b
+MODEL_DIR		  ?= $(CODE_DIR)/examples/chatglm/chatglm3_6b
 
 %_run:
 ifeq ($(DOCKER_PULL),1)
@@ -117,12 +126,14 @@ endif
 	docker run $(DOCKER_RUN_OPTS) $(DOCKER_RUN_ARGS) \
     		$(GPU_OPTS) \
     		--volume $(SOURCE_DIR):$(CODE_DIR) \
+    		--volume $(SOURCE_MODEL_DIR_ABS):$(MODEL_DIR) \
     		--env "CCACHE_DIR=${CCACHE_DIR}" \
     		--env "CCACHE_BASEDIR=${CODE_DIR}" \
     		--workdir $(WORK_DIR) \
     		--hostname $(shell hostname)-$* \
     		--name $(CONTAINER_NAME)-$*-$(USER_NAME) \
 			--tmpfs /tmp:exec \
+			--network host \
     		$(IMAGE_WITH_TAG)$(IMAGE_TAG_SUFFIX) $(RUN_CMD)
 
 devel_%: STAGE = devel
