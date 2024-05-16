@@ -9,6 +9,10 @@ FROM ${BASE_IMAGE}:${BASE_TAG} as base
 # The default values come from `nvcr.io/nvidia/pytorch`
 ENV BASH_ENV=${BASH_ENV:-/etc/bash.bashrc}
 ENV ENV=${ENV:-/etc/shinit_v2}
+
+ENV http_proxy=http://127.0.0.1:7890
+ENV https_proxy=http://127.0.0.1:7890
+
 SHELL ["/bin/bash", "-c"]
 
 FROM base as devel
