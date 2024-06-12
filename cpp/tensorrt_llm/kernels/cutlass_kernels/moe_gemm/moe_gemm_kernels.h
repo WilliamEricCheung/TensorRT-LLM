@@ -16,10 +16,12 @@
  */
 
 #pragma once
+#include "tensorrt_llm/common/cudaFp8Utils.h"
 #include "tensorrt_llm/common/workspace.h"
 #include "tensorrt_llm/cutlass_extensions/include/cutlass_extensions/gemm_configs.h"
 #include <cuda_runtime_api.h>
 #include <optional>
+#include <vector>
 
 #include <cutlass/gemm/group_array_problem_shape.hpp>
 
@@ -51,8 +53,11 @@ struct HopperGroupedGemmInput
 
     template <class T>
     constexpr static bool IsFP8_v = std::is_same_v<T, __nv_fp8_e4m3> || std::is_same_v<T, __nv_fp8_e5m2>;
+
+    // Although the user may be using half or bfloat for the unquantized FP8 type,
+    // we just pick one so we don't need to double our template count to distinguish the cases
     template <class T>
-    using OutputTypeAdaptor_t = std::conditional_t<IsFP8_v<T>, float, T>;
+    using OutputTypeAdaptor_t = std::conditional_t<IsFP8_v<T>, nv_bfloat16, T>;
 
     using ProblemShape = cutlass::gemm::GroupProblemShape<cute::Shape<int64_t, int64_t, int64_t>>;
 
@@ -160,32 +165,36 @@ public:
 
     void moeGemmBiasAct(T const* A, WeightType const* B, T const* weight_scales, T const* biases, T* C,
         int64_t* total_rows_before_expert, HopperGroupedGemmInput layout_info, int64_t total_rows, int64_t gemm_n,
-        int64_t gemm_k, int num_experts, ActivationType activation_type, cudaStream_t stream);
+        int64_t gemm_k, int num_experts, ActivationType activation_type, bool use_fused_moe, cudaStream_t stream);
 
     void moeGemm(T const* A, WeightType const* B, T const* weight_scales, T* C, int64_t* total_rows_before_expert,
         HopperGroupedGemmInput layout_info, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
-        cudaStream_t stream);
+        bool use_fused_moe, cudaStream_t stream);
 
     std::vector<cutlass_extensions::CutlassGemmConfig> getConfigs() const;
-    std::vector<cutlass_extensions::CutlassGemmConfig> getHopperConfigs() const;
-    std::vector<cutlass_extensions::CutlassGemmConfig> getAmpereConfigs() const;
+    static std::vector<cutlass_extensions::CutlassGemmConfig> getConfigs(int sm);
+    static std::vector<cutlass_extensions::CutlassGemmConfig> getHopperConfigs(int sm);
+    static std::vector<cutlass_extensions::CutlassGemmConfig> getAmpereConfigs(int sm);
 
     bool isHopperSpecialised() const;
     bool supportsHopperSpecialisation() const;
+    [[nodiscard]] bool isFusedGatedActivation(bool is_gated_activation, int gemm_n, int gemm_k) const;
 
     size_t calcMaxWorkspaceSize(int num_experts) const;
+
+    [[nodiscard]] int getSM() const;
 
 private:
     template <typename EpilogueTag>
     void dispatchToArch(T const* A, WeightType const* B, T const* weight_scales, T const* biases, T* C,
         int64_t* total_rows_before_expert, HopperGroupedGemmInput layout_info, int64_t total_rows, int64_t gemm_n,
-        int64_t gemm_k, int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config, cudaStream_t stream,
-        int* occupancy = nullptr);
+        int64_t gemm_k, int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config, bool use_fused_moe,
+        cudaStream_t stream, int* occupancy = nullptr);
 
     template <typename EpilogueTag>
     void runGemm(T const* A, WeightType const* B, T const* weight_scales, T const* biases, T* C,
         int64_t* total_rows_before_expert, HopperGroupedGemmInput layout_info, int64_t total_rows, int64_t gemm_n,
-        int64_t gemm_k, int num_experts, cudaStream_t stream);
+        int64_t gemm_k, int num_experts, bool use_fused_moe, cudaStream_t stream);
 
 private:
     int sm_;

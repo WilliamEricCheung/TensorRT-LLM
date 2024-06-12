@@ -1,5 +1,6 @@
 import os
 import unittest
+from difflib import SequenceMatcher
 
 import pytest
 import tensorrt as trt
@@ -10,6 +11,7 @@ from parameterized import parameterized
 import tensorrt_llm
 from tensorrt_llm._utils import torch_dtype_to_trt, trt_dtype_to_torch
 from tensorrt_llm.plugin.plugin import ContextFMHAType
+from tensorrt_llm.quantization import QuantMode
 from tensorrt_llm.runtime import TensorInfo
 
 
@@ -154,7 +156,8 @@ def create_session(builder,
                    int8=False,
                    opt_level=None,
                    memory_pool_limit=None,
-                   optimization_profiles=[]):
+                   optimization_profiles=[],
+                   quant_mode=QuantMode(0)):
     """
     This function creates an engine and a tensorrt_llm.runtime.Session for the engine.
     Args:
@@ -166,7 +169,8 @@ def create_session(builder,
     """
     builder_config = builder.create_builder_config(precision=precision,
                                                    int8=int8,
-                                                   opt_level=opt_level)
+                                                   opt_level=opt_level,
+                                                   quant_mode=quant_mode)
     # Some tests require to set mem pool limit to avoid OOM
     if memory_pool_limit is not None:
         builder_config.trt_builder_config.set_memory_pool_limit(
@@ -175,6 +179,8 @@ def create_session(builder,
     if len(optimization_profiles) > 0:
         for profile in optimization_profiles:
             builder_config.trt_builder_config.add_optimization_profile(profile)
+    # Disable TF32 for accuracy in testing.
+    builder_config.trt_builder_config.clear_flag(trt.BuilderFlag.TF32)
     engine = builder.build_engine(network, builder_config)
     assert engine is not None, "Failed to build engine"
     session = tensorrt_llm.runtime.Session.from_serialized_engine(engine)
@@ -209,3 +215,13 @@ def run_session(session, inputs):
     stream.synchronize()
 
     return outputs
+
+
+def similarity_score(a, b):
+    "similar compare a and b "
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def similar(a, b, threshold=0.8):
+    "similar compare a and b "
+    return similarity_score(a, b) >= threshold

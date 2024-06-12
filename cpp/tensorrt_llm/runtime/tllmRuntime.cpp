@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 #include "tllmRuntime.h"
+#include "tensorrt_llm/common/assert.h"
+#include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tllmLogger.h"
 
@@ -83,7 +85,8 @@ TllmRuntime::TllmRuntime(
     mEngineBuffer = mBufferManager.gpu(devMemorySize);
 
     // Print context memory size for CI/CD to track.
-    TLLM_LOG_INFO("Allocated %.2f MiB for execution context memory.", static_cast<double>(devMemorySize) / 1048576.0);
+    TLLM_LOG_INFO("[MemUsageChange] Allocated %.2f MiB for execution context memory.",
+        static_cast<double>(devMemorySize) / 1048576.0);
 }
 
 TllmRuntime::TllmRuntime(void const* engineData, std::size_t engineSize, float const gpuWeightsPercent = 1.0F)
@@ -111,10 +114,11 @@ nvinfer1::IExecutionContext& TllmRuntime::addContext(std::int32_t profileIndex)
     auto& context = *mContexts.back();
     context.setDeviceMemory(mEngineBuffer->data());
     context.setOptimizationProfileAsync(profileIndex, mStream->get());
-    // If nvtx verbosity is DETAILED, change it to LAYER_NAMES_ONLY for inference performance
+    // If nvtx verbosity is DETAILED, print an info about potential perf overhead.
     if (context.getNvtxVerbosity() == nvinfer1::ProfilingVerbosity::kDETAILED)
     {
-        context.setNvtxVerbosity(nvinfer1::ProfilingVerbosity::kLAYER_NAMES_ONLY);
+        TLLM_LOG_INFO(
+            "The engine was built with kDETAILED profiling verbosity, which may result in small overheads at runtime.");
     }
     return context;
 }
@@ -160,23 +164,17 @@ void TllmRuntime::setInputTensors(SizeType32 contextIndex, TensorMap const& tens
                 "%s: expected type %d, provided type %d", name, static_cast<std::int32_t>(engineDtype),
                 static_cast<std::int32_t>(tensorDtype));
 
-            auto const shapeExpected = mEngine->getTensorShape(name);
-            auto const shapeProvided = tensor->getShape();
-            TLLM_CHECK_WITH_INFO(shapeExpected.nbDims == shapeProvided.nbDims, "%s: expected %d dims, provided %d dims",
-                name, shapeExpected.nbDims, shapeProvided.nbDims);
-            for (SizeType32 j = 0; j < shapeExpected.nbDims; ++j)
+            auto const tensorShape = tensor->getShape();
+            auto const setInputShapeSuccess = context.setInputShape(name, tensorShape);
+            if (!setInputShapeSuccess)
             {
-                auto const dimExpected = shapeExpected.d[j];
-                auto const dimProvided = shapeProvided.d[j];
-                if (dimExpected >= 0 && dimExpected != dimProvided)
-                {
-                    TLLM_LOG_WARNING(
-                        "%s: expected dim[%d] = %d, provided dim[%d] = %d", name, j, dimExpected, j, dimProvided);
-                }
+                auto const minShape = mEngine->getProfileShape(name, contextIndex, nvinfer1::OptProfileSelector::kMIN);
+                auto const maxShape = mEngine->getProfileShape(name, contextIndex, nvinfer1::OptProfileSelector::kMAX);
+
+                TLLM_THROW("Tensor '%s' has invalid shape %s, expected in range min %s, max %s", name,
+                    ITensor::toString(tensorShape).c_str(), ITensor::toString(minShape).c_str(),
+                    ITensor::toString(maxShape).c_str());
             }
-            TLLM_CHECK_WITH_INFO(context.setInputShape(name, shapeProvided),
-                "Tensor '%s' has invalid shape %s, expected %s", name, ITensor::toString(shapeProvided).c_str(),
-                ITensor::toString(shapeExpected).c_str());
             auto* const data = tensor->data();
             if (data)
             {

@@ -198,10 +198,6 @@ def parse_arguments():
         help=
         'Quick sanity check with num_layer=1; will be silently ignored if --engine_dir is specified.'
     )
-    parser.add_argument('--strongly_typed',
-                        default=False,
-                        action='store_true',
-                        help='This option will reduce the building time.')
     parser.add_argument(
         '--gpu_weights_percent',
         type=str,
@@ -232,7 +228,8 @@ def parse_arguments():
         choices=[
             'fp8', 'fp8_gemm', 'fp8_kv_cache', 'int8_sq_per_tensor',
             'int8_sq_per_token_channel', 'int8_weight_only', 'int4_weight_only',
-            'int4_weight_only_awq', 'int4_weight_only_gptq'
+            'int4_weight_only_awq', 'int4_weight_only_gptq',
+            'int8_sq_per_channel_ootb'
         ],
         help="Optimize the model with specified quantization recipe")
     parser.add_argument(

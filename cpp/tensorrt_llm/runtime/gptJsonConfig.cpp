@@ -20,7 +20,9 @@
 #include "modelConfig.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/logger.h"
-#include "tensorrt_llm/common/stringUtils.h"
+#include "tensorrt_llm/runtime/explicitDraftTokensModule.h"
+#include "tensorrt_llm/runtime/lookaheadModule.h"
+#include "tensorrt_llm/runtime/medusaModule.h"
 
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -44,8 +46,8 @@ FieldType parseJsonFieldOr(Json const& json, std::string_view name, FieldType de
     }
     catch (nlohmann::json::out_of_range& e)
     {
-        TLLM_LOG_WARNING("Parameter %s cannot be read from json:", std::string(name).c_str());
-        TLLM_LOG_WARNING(e.what());
+        TLLM_LOG_INFO("Parameter %s cannot be read from json:", std::string(name).c_str());
+        TLLM_LOG_INFO(e.what());
     }
     return value;
 }
@@ -60,13 +62,13 @@ std::optional<FieldType> parseJsonFieldOptional(Json const& json, std::string_vi
     }
     catch (nlohmann::json::out_of_range const& e)
     {
-        TLLM_LOG_WARNING(e.what());
-        TLLM_LOG_WARNING("Optional value for parameter %s will not be set.", std::string(name).c_str());
+        TLLM_LOG_INFO(e.what());
+        TLLM_LOG_INFO("Optional value for parameter %s will not be set.", std::string(name).c_str());
     }
     catch (nlohmann::json::type_error const& e)
     {
-        TLLM_LOG_WARNING(e.what());
-        TLLM_LOG_WARNING("Optional value for parameter %s will not be set.", std::string(name).c_str());
+        TLLM_LOG_INFO(e.what());
+        TLLM_LOG_INFO("Optional value for parameter %s will not be set.", std::string(name).c_str());
     }
     return value;
 }
@@ -113,12 +115,13 @@ ModelConfig createModelConfig(
 {
     auto const& config = engineVersionNone ? json.at("builder_config") : json.at("pretrained_config");
 
-    auto const useCrossAttention = parseJsonFieldOptional<bool>(config, "cross_attention");
+    auto const* const archField = "architecture";
     auto const* const numLayersField = engineVersionNone ? "num_layers" : "num_hidden_layers";
     auto const* const numHeadsField = engineVersionNone ? "num_heads" : "num_attention_heads";
     auto const* const numKvHeadsField = engineVersionNone ? "num_kv_heads" : "num_key_value_heads";
     auto const* const mlpHiddenSizeField = engineVersionNone ? "mlp_hidden_size" : "intermediate_size";
 
+    auto const arch = engineVersionNone ? std::string("none") : config.at(archField).template get<std::string>();
     auto const numLayers = config.at(numLayersField).template get<SizeType32>();
     auto const numHeads = config.at(numHeadsField).template get<SizeType32>() / tensorParallelism;
     auto const layerStringTypes
@@ -145,10 +148,14 @@ ModelConfig createModelConfig(
     modelConfig.setNbKvHeads(numKvHeads);
     modelConfig.setLayerTypes(layerTypes);
 
-    if (useCrossAttention.has_value())
-    {
-        modelConfig.useCrossAttention(useCrossAttention.value());
-    }
+    // only enable cross attention for the decoder in encoder-decoder model
+    // TODO: add cross_attention and has_token_type_embedding as fields in pretrained config
+    auto const useCrossAttention = arch == std::string("DecoderModel") ? true : false;
+    auto const usePositionEmbedding = parseJsonFieldOr<bool>(config, "has_position_embedding", false);
+    auto const useTokenTypeEmbedding = parseJsonFieldOr<bool>(config, "has_token_type_embedding", false);
+    modelConfig.setUseCrossAttention(useCrossAttention);
+    modelConfig.setUsePositionEmbedding(usePositionEmbedding);
+    modelConfig.setUseTokenTypeEmbedding(useTokenTypeEmbedding);
 
     if (mlpHiddenSize.has_value())
     {
@@ -170,6 +177,8 @@ void parseBuilderConfig(ModelConfig& modelConfig, Json const& builderConfig)
         = parseJsonFieldOr<SizeType32>(builderConfig, "max_prompt_embedding_table_size", 0);
     auto const computeContextLogits = parseJsonFieldOr(builderConfig, "gather_context_logits", false);
     auto const computeGenerationLogits = parseJsonFieldOr(builderConfig, "gather_generation_logits", false);
+    auto const speculativeDecodingModeOpt
+        = parseJsonFieldOptional<SpeculativeDecodingMode::UnderlyingType>(builderConfig, "speculative_decoding_mode");
 
     modelConfig.setMaxBatchSize(maxBatchSize);
     modelConfig.setMaxBeamWidth(maxBeamWidth);
@@ -180,6 +189,9 @@ void parseBuilderConfig(ModelConfig& modelConfig, Json const& builderConfig)
     modelConfig.setMaxPromptEmbeddingTableSize(maxPromptEmbeddingTableSize);
     modelConfig.computeContextLogits(computeContextLogits);
     modelConfig.computeGenerationLogits(computeGenerationLogits);
+    modelConfig.setSpeculativeDecodingMode(speculativeDecodingModeOpt.has_value()
+            ? SpeculativeDecodingMode(speculativeDecodingModeOpt.value())
+            : SpeculativeDecodingMode::None());
 }
 
 void parsePluginConfig(ModelConfig& modelConfig, Json const& pluginConfig)
@@ -191,9 +203,13 @@ void parsePluginConfig(ModelConfig& modelConfig, Json const& pluginConfig)
     auto const& pagedKvCache = pluginConfig.at("paged_kv_cache");
     auto const& tokensPerBlock = pluginConfig.at("tokens_per_block");
     auto const useCustomAllReduce = pluginConfig.at("use_custom_all_reduce").template get<bool>();
+    auto const contextFMHA = pluginConfig.at("context_fmha").template get<bool>();
     auto const pagedContextFMHA = pluginConfig.at("use_paged_context_fmha").template get<bool>();
     auto const pagedState = parseJsonFieldOr(pluginConfig, "paged_state", false);
     auto const useXQA = parseJsonFieldOr(pluginConfig, "enable_xqa", false);
+
+    TLLM_CHECK_WITH_INFO(
+        !removeInputPadding || modelConfig.getMaxNumTokens(), "Padding removal requires max_num_tokens to be set.");
 
     modelConfig.useGptAttentionPlugin(useGptAttentionPlugin);
     modelConfig.useMambaConv1dPlugin(useMambaConv1dPlugin);
@@ -202,6 +218,7 @@ void parsePluginConfig(ModelConfig& modelConfig, Json const& pluginConfig)
     modelConfig.usePagedState(pagedState);
     modelConfig.setTokensPerBlock(tokensPerBlock);
     modelConfig.useCustomAllReduce(useCustomAllReduce);
+    modelConfig.setContextFMHA(contextFMHA);
     modelConfig.setPagedContextFMHA(pagedContextFMHA);
     modelConfig.useXQA(useXQA);
 }
@@ -333,19 +350,51 @@ GptJsonConfig parseJson(InputType&& input)
         }
     }
 
+    // Speculative decoding module
     if (!engineVersionNone)
     {
-        auto const& pretrainedConfig = json.at("pretrained_config");
-        auto const medusaHeads = parseJsonFieldOptional<SizeType32>(pretrainedConfig, "num_medusa_heads");
-        auto const maxDraftLen = parseJsonFieldOptional<SizeType32>(pretrainedConfig, "max_draft_len");
-        TLLM_CHECK_WITH_INFO((medusaHeads.has_value() ^ maxDraftLen.has_value()) == 0,
-            "Either both num_medusa_heads and max_draft_len or none have to be provided");
-        if (medusaHeads.has_value() && medusaHeads.value() > 0)
+        SizeType32 maxDraftLen{0};
+        if (modelConfig.getSpeculativeDecodingMode().isExplicitDraftTokens())
         {
-            modelConfig.setMaxDraftLen(maxDraftLen.value());
-            auto medusaModule = MedusaModule(medusaHeads.value(), maxDraftLen.value());
-            modelConfig.setMedusaModule(medusaModule);
+            auto const& pretrainedConfig = json.at("pretrained_config");
+
+            // TODO(rkobus): adjust param names
+            auto const maxNumPaths = parseJsonFieldOr(pretrainedConfig, "explicit_num_beams", 0);
+            auto const maxDraftPathLen = parseJsonFieldOr(pretrainedConfig, "explicit_draft_len_per_beam", 0);
+            maxDraftLen = maxNumPaths * maxDraftPathLen;
+
+            auto explicitDraftTokensModule
+                = std::make_shared<ExplicitDraftTokensModule>(maxDraftPathLen, maxDraftLen, maxNumPaths);
+            modelConfig.setSpeculativeDecodingModule(explicitDraftTokensModule);
         }
+        else if (modelConfig.getSpeculativeDecodingMode().isMedusa())
+        {
+            auto const& pretrainedConfig = json.at("pretrained_config");
+            maxDraftLen = parseJsonFieldOr(pretrainedConfig, "max_draft_len", 0);
+            auto const medusaHeads = parseJsonFieldOptional<SizeType32>(pretrainedConfig, "num_medusa_heads");
+            TLLM_CHECK_WITH_INFO(medusaHeads.has_value() && maxDraftLen > 0,
+                "Both num_medusa_heads and max_draft_len have to be provided for Medusa model");
+
+            auto medusaModule = std::make_shared<MedusaModule>(medusaHeads.value(), maxDraftLen);
+            modelConfig.setSpeculativeDecodingModule(medusaModule);
+        }
+        else
+        {
+            maxDraftLen = parseJsonFieldOr(builderConfig, "max_draft_len", 0);
+            if (modelConfig.getSpeculativeDecodingMode().isLookaheadDecoding())
+            {
+                TLLM_CHECK_WITH_INFO(
+                    maxDraftLen > 0, "max_draft_len has to be larger than 0 for Lookahead decoding model");
+                auto lookaheadDecodingModule = std::make_shared<LookaheadModule>(maxDraftLen, maxDraftLen);
+                modelConfig.setSpeculativeDecodingModule(lookaheadDecodingModule);
+            }
+            else if (modelConfig.getSpeculativeDecodingMode().isDraftTokensExternal())
+            {
+                TLLM_CHECK_WITH_INFO(
+                    maxDraftLen, "max_draft_len has to be larger than 0 for decoding with external draft tokens");
+            }
+        }
+        modelConfig.setMaxDraftLen(maxDraftLen);
     }
 
     // RNN config

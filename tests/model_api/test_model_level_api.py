@@ -8,8 +8,9 @@ from profile_utils import profile
 
 import tensorrt_llm
 from tensorrt_llm.builder import BuildConfig, build
-from tensorrt_llm.executor import GenerationExecutor, SamplingConfig
+from tensorrt_llm.executor import GenerationExecutor, SamplingParams
 from tensorrt_llm.models import LLaMAForCausalLM
+from tensorrt_llm.models.llama.config import LLaMAConfig
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils.llm_data import llm_models_root
@@ -68,7 +69,7 @@ def test_save_load():
             for idx, output in enumerate(
                     executor.generate(
                         input_text,
-                        sampling_config=SamplingConfig(max_new_tokens=10))):
+                        sampling_params=SamplingParams(max_new_tokens=10))):
                 tensorrt_llm.logger.info(f"Input: {input_text[idx]}")
                 tensorrt_llm.logger.info(f'Output: {output.text}')
                 # note the output.text contains everything from the input, so only compare the suffix here.
@@ -80,7 +81,7 @@ def test_save_load():
 @profile(tag="fake-weights")
 @force_ampere
 def test_high_level_fake_weights():
-    '''sanity to make sure the flow works. The key is "skip_loading_weights" param
+    '''sanity to make sure the flow works.
     '''
     input_text = [
         'Born in north-east France, Soyer trained as a',
@@ -90,9 +91,8 @@ def test_high_level_fake_weights():
     hf_model_dir = llm_models_root() / "llama-models/llama-7b-hf"
 
     # Fake weights, skipping save and load engine. Make it faster to sanity test
-    llama = LLaMAForCausalLM.from_hugging_face(hf_model_dir,
-                                               'float16',
-                                               skip_loading_weights=True)
+    config = LLaMAConfig.from_hugging_face(hf_model_dir, dtype='float16')
+    llama = LLaMAForCausalLM(config)
     build_config = BuildConfig(max_batch_size=max_batch_size,
                                max_input_len=max_isl,
                                max_output_len=max_osl,
@@ -127,7 +127,7 @@ def test_inflight_batching():
                 result = async_engine.generate_async(
                     inp,
                     streaming=False,
-                    sampling_config=SamplingConfig(max_new_tokens=10))
+                    sampling_params=SamplingParams(max_new_tokens=10))
                 await result.aresult()
                 tensorrt_llm.logger.info(result.text)
                 assert result.text.endswith(expected_output[idx])
@@ -136,7 +136,7 @@ def test_inflight_batching():
                 async for stream in async_engine.generate_async(
                         inp,
                         streaming=True,
-                        sampling_config=SamplingConfig(max_new_tokens=10)):
+                        sampling_params=SamplingParams(max_new_tokens=10)):
                     output += stream.text + ' '
                     tensorrt_llm.logger.info(
                         f"prompt: '{inp}', generation: '{output}'")

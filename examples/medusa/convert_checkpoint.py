@@ -13,7 +13,6 @@ import numpy as np
 import safetensors
 import torch
 import torch.nn as nn
-from datasets import load_dataset
 from tqdm import tqdm
 from transformers import LlamaConfig, LlamaForCausalLM, LlamaTokenizer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
@@ -23,8 +22,9 @@ import tensorrt_llm
 from tensorrt_llm._utils import str_dtype_to_torch
 from tensorrt_llm.logger import logger
 from tensorrt_llm.mapping import Mapping
-from tensorrt_llm.models.llama.weight import load_from_hf_checkpoint
-from tensorrt_llm.models.modeling_utils import PretrainedConfig
+from tensorrt_llm.models import PretrainedConfig
+from tensorrt_llm.models.convert_utils import load_calib_dataset
+from tensorrt_llm.models.llama.convert import load_weights_from_hf_by_shard
 from tensorrt_llm.quantization import QuantAlgo
 
 try:
@@ -69,6 +69,13 @@ def parse_arguments():
         help=
         'Define the precision for the weights when using weight-only quantization.'
         'You must also use --use_weight_only for that argument to have an impact.'
+    )
+    parser.add_argument(
+        '--calib_dataset',
+        type=str,
+        default='ccdv/cnn_dailymail',
+        help=
+        "The huggingface dataset name or the local directory of the dataset for calibration."
     )
     parser.add_argument(
         "--smoothquant",
@@ -498,8 +505,8 @@ def capture_activation_range(model,
                     functools.partial(stat_input_hook, name=name)))
 
     for i in tqdm(range(num_samples), desc="calibrating model"):
-        datapoint = dataset['train'][i:i + 1]
-        line = copy.copy(datapoint['article'])
+        datapoint = dataset[i:i + 1]
+        line = copy.copy(datapoint)
         line[0] = line[0] + ' TL;DR: '
         line[0] = line[0].strip()
         line[0] = line[0].replace(" n't", "n't")
@@ -571,9 +578,9 @@ def get_tllm_linear_weight(weight,
                            postfix='weight'):
     results = {}
     if use_weight_only:
-        v = weight.t().contiguous()
+        v = weight.t().contiguous().cpu()
         processed_torch_weights, torch_weight_scales = \
-            torch.ops.fastertransformer.symmetric_quantize_last_axis_of_batched_matrix(
+            torch.ops.trtllm.symmetric_quantize_last_axis_of_batched_matrix(
                 v, plugin_weight_only_quant_type)
         results[prefix + postfix] = processed_torch_weights
         results[prefix + 'per_channel_scale'] = torch_weight_scales
@@ -1134,14 +1141,12 @@ if __name__ == '__main__':
                 logger.warning(
                     "Note that running capture_activation_range on cpu would be very small."
                 )
-            dataset = load_dataset("ccdv/cnn_dailymail",
-                                   '3.0.0',
-                                   cache_dir=args.dataset_cache_dir)
+            tokenizer = LlamaTokenizer.from_pretrained(args.model_dir,
+                                                       padding_side='left')
+            dataset = load_calib_dataset(args.calib_dataset,
+                                         cache_dir=args.dataset_cache_dir)
 
-            act_range = capture_activation_range(
-                model,
-                LlamaTokenizer.from_pretrained(args.model_dir,
-                                               padding_side='left'), dataset)
+            act_range = capture_activation_range(model, tokenizer, dataset)
             if args.smoothquant is not None:
                 smooth_llama_model(model, act_range, args.smoothquant,
                                    llama_qkv_para, llama_smoother)
@@ -1162,8 +1167,8 @@ if __name__ == '__main__':
             assert False, "Never supported"
         else:
             if args.load_by_shard:
-                weights = load_from_hf_checkpoint(
-                    args.model_dir, mapping, PretrainedConfig.from_dict(config))
+                weights = load_weights_from_hf_by_shard(
+                    args.model_dir, PretrainedConfig.from_dict(config))
 
             else:
                 weights = convert_hf_llama(
@@ -1188,8 +1193,21 @@ if __name__ == '__main__':
                                    mapping=Mapping(),
                                    dtype='float32'):
                     logger.info("Loading Medusa heads' weights ...")
+                    is_ckpt_safetensors = False
+
                     ckpt_file = Path(medusa_path) / "medusa_lm_head.pt"
-                    state_dict = torch.load(ckpt_file, map_location="cpu")
+                    if not ckpt_file.exists():
+                        ckpt_file = Path(
+                            medusa_path) / "medusa_lm_head.safetensors"
+                        is_ckpt_safetensors = True
+
+                    if is_ckpt_safetensors:
+                        logger.info("Safetensors Found ...")
+                        from safetensors.torch import load_file
+                        state_dict = load_file(ckpt_file)
+                    else:
+                        state_dict = torch.load(ckpt_file, map_location="cpu")
+
                     torch_dtype = str_dtype_to_torch(dtype)
                     weights = {}
 
@@ -1198,10 +1216,13 @@ if __name__ == '__main__':
                             w = state_dict[f"{h}.{l}.linear.weight"].clone().to(
                                 torch_dtype)
 
-                            weights[
-                                'medusa_heads.{}.medusa_layers.{}.linear.weight'
-                                .format(h, l)] = split(w, mapping.tp_size,
-                                                       mapping.tp_rank)
+                            split_v = split(w, mapping.tp_size, mapping.tp_rank)
+                            weights.update(
+                                get_tllm_linear_weight(
+                                    split_v,
+                                    f'medusa_heads.{h}.medusa_layers.{l}.linear.',
+                                    None, args.use_weight_only,
+                                    plugin_weight_only_quant_type))
 
                             b = state_dict[f"{h}.{l}.linear.bias"].clone().to(
                                 torch_dtype)

@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 #include <sstream>
 
@@ -10,66 +25,50 @@ namespace tensorrt_llm::layers
 using namespace tensorrt_llm::runtime;
 using TensorPtr = ITensor::SharedPtr;
 
-void printTokens2d(char const* name, TensorPtr const& tensor)
+ITensor::UniquePtr slice(
+    ITensor::SharedPtr tensor, std::initializer_list<SizeType32> const& offsetDims, size_t const sizeDim)
 {
-    auto M = tensor->getShape().d[0];
-    auto N = tensor->getShape().d[1];
-    auto tensorRange = BufferRange<TokenIdType>(*tensor);
-    std::ostringstream buf;
-    buf << name << ": " << tensor->getShape() << "(\n";
-    for (SizeType32 mi = 0; mi < M; mi++)
+    auto shape = tensor->getShape();
+    TLLM_CHECK(offsetDims.size() > 0);
+    TLLM_CHECK(shape.nbDims >= offsetDims.size());
+    std::vector<size_t> volumes(shape.nbDims);
+
+    int i;
+    volumes[shape.nbDims - 1] = 1;
+    for (i = shape.nbDims - 2; i >= 0; i--)
     {
-        for (SizeType32 ni = 0; ni < N; ni++)
-        {
-            auto token = tensorRange[mi * N + ni];
-            if (token >= 0 && token <= 255)
-            {
-                buf << "'" << static_cast<char>(token) << "'";
-            }
-            else
-            {
-                buf << token;
-            }
-            buf << (ni == (N - 1) ? ';' : ',');
-        }
-        if (mi != M - 1)
-        {
-            buf << std::endl;
-        }
+        volumes[i] = shape.d[i + 1] * volumes[i + 1];
     }
-    buf << ")" << std::endl;
-    TLLM_LOG_DEBUG(buf.str());
+
+    size_t offset = 0;
+    i = 0;
+    for (auto itd = offsetDims.begin(); itd != offsetDims.end(); itd++)
+    {
+        TLLM_CHECK(0 <= (*itd) && (*itd) < shape.d[i]);
+        offset += (*itd) * volumes[i++];
+    }
+
+    ITensor::Shape dims;
+    dims.nbDims = shape.nbDims - offsetDims.size() + 1;
+    dims.d[0] = sizeDim;
+    for (i = 1; i < dims.nbDims; i++)
+    {
+        dims.d[i] = shape.d[i - 1 + offsetDims.size()];
+    }
+
+    size_t size = ITensor::volume(dims);
+
+    return std::make_unique<TensorView>(std::move(tensor), offset, size, dims);
 }
 
-void printTokens(char const* name, TensorPtr const& tensor)
+ITensor::UniquePtr slice(ITensor::SharedPtr tensor, std::initializer_list<SizeType32> const& offsetDims)
 {
-    std::ostringstream buf;
-    buf << name << ": " << tensor->getShape() << "(";
-    for (auto const& token : BufferRange<TokenIdType>(*tensor))
+    auto result = slice(tensor, offsetDims, 1);
+    if (result->getShape().nbDims > 1)
     {
-        if (token >= 0 && token <= 255)
-        {
-            buf << "'" << static_cast<char>(token) << "',";
-        }
-        else
-        {
-            buf << token << ",";
-        }
+        result->squeeze(0);
     }
-    buf << ")" << std::endl << std::flush;
-    TLLM_LOG_DEBUG(buf.str());
-}
-
-void printTensor(char const* name, TensorPtr const& tensor)
-{
-    std::ostringstream buf;
-    buf << name << ": " << tensor->getShape() << "(";
-    for (auto const& token : BufferRange<TokenIdType>(*tensor))
-    {
-        buf << token << ",";
-    }
-    buf << ")" << std::endl << std::flush;
-    TLLM_LOG_DEBUG(buf.str());
+    return result;
 }
 
 } // namespace tensorrt_llm::layers

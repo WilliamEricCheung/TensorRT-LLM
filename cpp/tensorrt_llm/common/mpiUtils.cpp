@@ -22,8 +22,12 @@
 #include "tensorrt_llm/runtime/iBuffer.h"
 
 #include <csignal>
+#include <cstdlib>
 #include <mutex>
 #include <type_traits>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 // We rely on SizeType32 being int32_t in some places with weak type checking,
 // i.e. we're passing void ptr to some function. To prevent mysterious errors
@@ -91,7 +95,7 @@ std::mutex mpiMutex;
 
 } // namespace
 
-void initialize(MpiThreadSupport threadMode)
+void initialize(MpiThreadSupport threadMode, bool forwardAbortToParent)
 {
     std::lock_guard<std::mutex> lk(mpiMutex);
     if (mpiInitialized)
@@ -110,8 +114,36 @@ void initialize(MpiThreadSupport threadMode)
         TLLM_CHECK_WITH_INFO(providedMode >= requiredMode, "MPI_Init_thread failed");
         std::atexit([]() { MPI_Finalize(); });
 
-        auto previousHandler = std::signal(SIGABRT, [](int signal) { MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE); });
-        TLLM_CHECK_WITH_INFO(previousHandler != SIG_ERR, "Signal handler setup failed");
+        /*
+         * We only catch SIGABRT and SIGSEGV because most, of not all errors in the worker will cause one of these 2
+         * signals. Signals like SIGINT and SIGTERM should be issued to the parent and should terminate MPI workers
+         * correctly.
+         */
+        for (int sig : {SIGABRT, SIGSEGV})
+        {
+            __sighandler_t previousHandler = nullptr;
+            if (forwardAbortToParent)
+            {
+                previousHandler = std::signal(sig,
+                    [](int signal)
+                    {
+#ifndef _WIN32
+                        pid_t parentProcessId = getppid();
+                        kill(parentProcessId, SIGKILL);
+#endif
+                        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+                    });
+            }
+            else
+            {
+                previousHandler = std::signal(sig, [](int signal) { MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE); });
+            }
+            TLLM_CHECK_WITH_INFO(previousHandler != SIG_ERR, "Signal handler setup failed");
+        }
+
+        // ensure local MPI communicator is initialized
+        MpiComm::localSession();
+        TLLM_LOG_INFO("Initialized MPI");
     }
 #endif // ENABLE_MULTI_DEVICE
     mpiInitialized = true;
@@ -269,6 +301,24 @@ MpiComm& MpiComm::session()
 {
     static MpiComm commSession{world(), false};
     return commSession;
+}
+
+MpiComm getLocalSession()
+{
+#if ENABLE_MULTI_DEVICE
+    MPI_Comm localComm;
+    MPI_Comm_split_type(MPI_COMM_WORLD, OMPI_COMM_TYPE_HOST, 0, MPI_INFO_NULL, &localComm);
+    MpiComm localSession{localComm, false};
+#else
+    MpiComm localSession{MPI_COMM_WORLD, false};
+#endif // ENABLE_MULTI_DEVICE
+    return localSession;
+}
+
+MpiComm& MpiComm::localSession()
+{
+    static MpiComm localSession = getLocalSession();
+    return localSession;
 }
 
 MpiComm::MpiComm(MPI_Comm g, bool freeComm)

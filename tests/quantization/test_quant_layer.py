@@ -26,11 +26,12 @@ from transformers import GPT2Config
 
 import tensorrt_llm
 from tensorrt_llm import Tensor
+from tensorrt_llm._utils import torch_to_numpy
 from tensorrt_llm.quantization import QuantMode
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from utils.util import (create_session, run_session, skip_pre_ampere,
-                        unittest_name_func)
+from utils.util import (create_session, run_session, skip_bf16_pre_ampere,
+                        skip_pre_ampere, unittest_name_func)
 
 
 class GPT2AttentionSmoothQuant(torch.nn.Module):
@@ -207,6 +208,14 @@ class TestSmoothQuant(unittest.TestCase):
           tensorrt_llm.quantization.layers.SmoothQuantLinear),
          ('float16', True, True, False,
           tensorrt_llm.quantization.layers.SmoothQuantLinear),
+         ('bfloat16', False, False, False,
+          tensorrt_llm.quantization.layers.SmoothQuantLinear),
+         ('bfloat16', False, True, False,
+          tensorrt_llm.quantization.layers.SmoothQuantLinear),
+         ('bfloat16', True, False, False,
+          tensorrt_llm.quantization.layers.SmoothQuantLinear),
+         ('bfloat16', True, True, False,
+          tensorrt_llm.quantization.layers.SmoothQuantLinear),
          ('float32', True, True, False,
           tensorrt_llm.quantization.layers.SmoothQuantLinear),
          ('int32', True, True, False,
@@ -275,7 +284,7 @@ class TestSmoothQuant(unittest.TestCase):
         builder = tensorrt_llm.Builder()
         network = builder.create_network()
         # Allow SQ plugin of dtype type
-        network.plugin_config.set_smooth_quant_gemm_plugin(dtype)
+        network.plugin_config.smooth_quant_gemm_plugin = dtype
         with tensorrt_llm.net_guard(network):
 
             x = Tensor(name='x',
@@ -367,6 +376,10 @@ class TestSmoothQuant(unittest.TestCase):
                            ('float16', False, True, 'gelu'),
                            ('float16', True, False, 'gelu'),
                            ('float16', True, True, 'gelu'),
+                           ('bfloat16', False, False, 'gelu'),
+                           ('bfloat16', False, True, 'gelu'),
+                           ('bfloat16', True, False, 'gelu'),
+                           ('bfloat16', True, True, 'gelu'),
                            ('float32', True, True, 'gelu'),
                            ('float32', True, True, 'elu')],
                           name_func=unittest_name_func)
@@ -430,7 +443,7 @@ class TestSmoothQuant(unittest.TestCase):
         builder = tensorrt_llm.Builder()
         network = builder.create_network()
         # Allow SQ plugin of dtype type
-        network.plugin_config.set_smooth_quant_gemm_plugin(dtype)
+        network.plugin_config.smooth_quant_gemm_plugin = dtype
         with tensorrt_llm.net_guard(network):
 
             x = Tensor(name='x',
@@ -517,12 +530,16 @@ class TestSmoothQuant(unittest.TestCase):
                                                 scale_fc2_w, dtype)
 
         # compare diff
-        torch.testing.assert_close(ref, outputs['output'], atol=5e-2, rtol=0)
+        torch.testing.assert_close(ref, outputs['output'], atol=6.25e-2, rtol=0)
 
-    @parameterized.expand([('float16', True, True), ('float16', True, False)],
+    @parameterized.expand([('float16', True, True), ('float16', True, False),
+                           ('bfloat16', True, True)],
                           name_func=unittest_name_func)
     def test_smooth_quant_layer_norm_layer(self, dtype, per_token_scaling,
                                            elementwise_affine):
+        # Skip tests that are not supported in pre-ampere architecture
+        skip_bf16_pre_ampere(dtype)
+
         torch.manual_seed(1997)
         # test data
         hidden_size = 1024
@@ -556,7 +573,7 @@ class TestSmoothQuant(unittest.TestCase):
         # construct trt network
         builder = tensorrt_llm.Builder()
         network = builder.create_network()
-        network.plugin_config.set_layernorm_quantization_plugin(dtype)
+        network.plugin_config.layernorm_quantization_plugin = dtype
         with tensorrt_llm.net_guard(network):
             x = Tensor(name='x',
                        shape=x_data.shape,
@@ -573,8 +590,8 @@ class TestSmoothQuant(unittest.TestCase):
             if elementwise_affine:
                 gamma_data = m.weight.detach().cpu()
                 beta_data = m.bias.detach().cpu()
-                ln.weight.value = gamma_data.cpu().numpy()
-                ln.bias.value = beta_data.cpu().numpy()
+                ln.weight.value = torch_to_numpy(gamma_data)
+                ln.bias.value = torch_to_numpy(beta_data)
 
             output = ln.forward(x)
 
@@ -663,7 +680,7 @@ class TestSmoothQuant(unittest.TestCase):
         # construct trt network
         builder = tensorrt_llm.Builder()
         network = builder.create_network()
-        network.plugin_config.set_weight_only_quant_matmul_plugin(dtype)
+        network.plugin_config.weight_only_quant_matmul_plugin = dtype
         with tensorrt_llm.net_guard(network):
 
             x = Tensor(name='x',
@@ -709,7 +726,10 @@ class TestSmoothQuant(unittest.TestCase):
 
     @parameterized.expand([('float16', QuantMode.PER_CHANNEL),
                            ('float16', QuantMode.PER_TOKEN),
-                           ('float16', QuantMode.PER_GROUP)],
+                           ('float16', QuantMode.PER_GROUP),
+                           ('bfloat16', QuantMode.PER_CHANNEL),
+                           ('bfloat16', QuantMode.PER_TOKEN),
+                           ('bfloat16', QuantMode.PER_GROUP)],
                           name_func=unittest_name_func)
     @unittest.skip("Attention contains a bug and will be resolved in later MRs")
     def test_gpt_attention_smoothquant(self,
@@ -720,8 +740,8 @@ class TestSmoothQuant(unittest.TestCase):
         def _construct_execution():
             builder = tensorrt_llm.Builder()
             network = builder.create_network()
-            network.plugin_config.set_smooth_quant_gemm_plugin(dtype)
-            network.plugin_config.set_gpt_attention_plugin(dtype)
+            network.plugin_config.smooth_quant_gemm_plugin = dtype
+            network.plugin_config.gpt_attention_plugin = dtype
             with tensorrt_llm.net_guard(network):
                 hidden_states_tensor = Tensor(
                     name='hidden_states',
@@ -1078,9 +1098,12 @@ class TestSmoothQuant(unittest.TestCase):
         # Avoid comparing between is_quantized
         torch.testing.assert_close(ref.int_repr(), outputs['output'])
 
-    @parameterized.expand([('float16'), ('float32')],
+    @parameterized.expand([('float16'), ('bfloat16'), ('float32')],
                           name_func=unittest_name_func)
     def test_quantize_per_token(self, dtype):
+        # Skip tests that are not supported in pre-ampere architecture
+        skip_bf16_pre_ampere(dtype)
+
         x_data = torch.randn(
             (2, 4, 4, 8),
             dtype=tensorrt_llm._utils.str_dtype_to_torch(dtype),

@@ -565,6 +565,7 @@ class LoraManager(object):
             all_weights = get_all_hf_lora_weights(lora_model, hf_modules,
                                                   component)
             rank = int(hf_config["r"])
+            rs_lora = bool(hf_config.get("use_rslora", False))
 
             self._lora_uid_to_low_ranks[uid] = {}
             self._lora_weights_pointers_list[uid] = {}
@@ -629,7 +630,10 @@ class LoraManager(object):
 
                     t_in = t_in.cuda().contiguous()
                     t_out = t_out.cuda().contiguous()
-                    scale = float(hf_config["lora_alpha"]) / rank
+                    if rs_lora:
+                        scale = float(hf_config["lora_alpha"]) / np.sqrt(rank)
+                    else:
+                        scale = float(hf_config["lora_alpha"]) / rank
                     t_out = t_out * scale
                     t_in = t_in.to(str_dtype_to_torch(dtype))
                     t_out = t_out.to(str_dtype_to_torch(dtype))
@@ -720,19 +724,22 @@ class LoraManager(object):
                 lora_ranks_ = []
                 lora_ptrs_ = []
                 for lora_uid in lora_uids:
-                    if (lora_uid != "-1"
-                            and layer_idx in self.uid_to_low_ranks(lora_uid)
-                            and self.uid_to_low_ranks(
-                                lora_uid)[layer_idx][lora_module] != 0):
-                        lora_ranks_.append(
-                            self.uid_to_low_ranks(lora_uid)[layer_idx]
-                            [lora_module])
-                        lora_ptrs_.append(
-                            self.lora_weights_pointers_list[lora_uid][layer_idx]
-                            [lora_module])
-                    else:
-                        lora_ranks_.append(0)
-                        lora_ptrs_.append([0, 0])
+                    lora_rank = 0
+                    lora_ptrs = [0, 0]
+
+                    if lora_uid != "-1":
+                        low_ranks = self.uid_to_low_ranks(lora_uid)
+
+                        if (layer_idx in low_ranks
+                                and lora_module in low_ranks[layer_idx].keys()
+                                and low_ranks[layer_idx][lora_module] != 0):
+
+                            lora_rank = low_ranks[layer_idx][lora_module]
+                            lora_ptrs = self.lora_weights_pointers_list[
+                                lora_uid][layer_idx][lora_module]
+
+                    lora_ranks_.append(lora_rank)
+                    lora_ptrs_.append(lora_ptrs)
 
                 inputs[
                     f'{lora_module}_lora_ranks_{layer_idx}'] = torch.IntTensor(

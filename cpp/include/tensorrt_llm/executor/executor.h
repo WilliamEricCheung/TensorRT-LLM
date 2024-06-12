@@ -58,7 +58,8 @@ public:
         std::optional<FloatType> const& presencePenalty = std::nullopt,
         std::optional<FloatType> const& frequencyPenalty = std::nullopt,
         std::optional<FloatType> const& lengthPenalty = std::nullopt,
-        std::optional<SizeType32> const& earlyStopping = std::nullopt);
+        std::optional<SizeType32> const& earlyStopping = std::nullopt,
+        std::optional<SizeType32> const& noRepeatNgramSize = std::nullopt);
 
     bool operator==(SamplingConfig const& other) const;
 
@@ -77,8 +78,38 @@ public:
     [[nodiscard]] std::optional<FloatType> getFrequencyPenalty() const;
     [[nodiscard]] std::optional<FloatType> getLengthPenalty() const;
     [[nodiscard]] std::optional<SizeType32> getEarlyStopping() const;
+    [[nodiscard]] std::optional<SizeType32> getNoRepeatNgramSize() const;
+
+    void setBeamWidth(SizeType32 beamWidth);
+    void setTopK(std::optional<SizeType32> const& topK);
+    void setTopP(std::optional<FloatType> const& topP);
+    void setTopPMin(std::optional<FloatType> const& topPMin);
+    void setTopPResetIds(std::optional<TokenIdType> const& topPResetIds);
+    void setTopPDecay(std::optional<FloatType> const& topPDecay);
+    void setRandomSeed(std::optional<RandomSeedType> const& randomSeed);
+    void setTemperature(std::optional<FloatType> const& temperature);
+    void setMinLength(std::optional<SizeType32> const& minLength);
+    void setBeamSearchDiversityRate(std::optional<FloatType> const& beamSearchDiversityRate);
+    void setRepetitionPenalty(std::optional<FloatType> const& repetitionPenalty);
+    void setPresencePenalty(std::optional<FloatType> const& presencePenalty);
+    void setFrequencyPenalty(std::optional<FloatType> const& frequencyPenalty);
+    void setLengthPenalty(std::optional<FloatType> const& lengthPenalty);
+    void setEarlyStopping(std::optional<SizeType32> const& earlyStopping);
+    void setNoRepeatNgramSize(std::optional<SizeType32> const& noRepeatNgramSize);
 
 private:
+    static SizeType32 checkBeamWidth(SizeType32 beamWidth);
+    static std::optional<FloatType> const& checkTopK(std::optional<FloatType> const& topK);
+    static std::optional<FloatType> const& checkTopP(std::optional<FloatType> const& topP);
+    static std::optional<FloatType> const& checkTopPMin(std::optional<FloatType> const& topPMin);
+    static std::optional<TokenIdType> const& checkTopPResetIds(std::optional<TokenIdType> const& topPResetIds);
+    static std::optional<FloatType> const& checkTopPDecay(std::optional<FloatType> const& topPDecay);
+    static std::optional<FloatType> const& checkTemperature(std::optional<FloatType> const& temperature);
+    static std::optional<SizeType32> const& checkMinLength(std::optional<SizeType32> const& minLength);
+    static std::optional<SizeType32> const& checkNoRepeatNgramSize(std::optional<SizeType32> const& noRepeatNgramSize);
+    static std::optional<FloatType> const& checkBeamSearchDiversityRate(
+        std::optional<FloatType> const& beamSearchDiversityRate);
+
     friend class Serialization;
 
     /// @brief The beam width. Default is 1 which disables beam search.
@@ -115,6 +146,8 @@ private:
     /// @brief Controls whether the generation process finishes once beamWidth sentences are generated (ends with
     /// end_token)
     std::optional<SizeType32> mEarlyStopping;
+    /// @brief Controls how many repeat ngram size are acceptable. Default is 1 << 30.
+    std::optional<SizeType32> mNoRepeatNgramSize;
 };
 
 /// @brief Configuration that controls the outputs of a Result
@@ -122,7 +155,7 @@ class OutputConfig
 {
 public:
     explicit OutputConfig(bool returnLogProbs = false, bool returnContextLogits = false,
-        bool returnGenerationLogits = false, bool excludeInputFromOutput = false);
+        bool returnGenerationLogits = false, bool excludeInputFromOutput = false, bool returnEncoderOutput = false);
 
     /// @brief Controls if Result should contain log probabilities. Default is false.
     bool returnLogProbs;
@@ -132,14 +165,17 @@ public:
     bool returnGenerationLogits;
     /// @brief Controls if output tokens in Result should include the input tokens. Default is false.
     bool excludeInputFromOutput;
+    /// @brief Controls if Result should contain encoder output hidden states (for encoder-only and encoder-decoder
+    /// models). Default is false.
+    bool returnEncoderOutput;
 };
 
-/// @brief Configuration for speculative decoding. Allows to include draft tokens, draft logits and specify acceptance
-/// threshold
-class SpeculativeDecodingConfig
+/// @brief Configuration for speculative decoding with external draft tokens.
+/// Allows to include draft tokens, draft logits and specify acceptance threshold.
+class ExternalDraftTokensConfig
 {
 public:
-    explicit SpeculativeDecodingConfig(VecTokens tokens, std::optional<Tensor> logits = std::nullopt,
+    explicit ExternalDraftTokensConfig(VecTokens tokens, std::optional<Tensor> logits = std::nullopt,
         std::optional<FloatType> const& acceptanceThreshold = std::nullopt);
 
     [[nodiscard]] VecTokens getTokens() const;
@@ -209,21 +245,23 @@ public:
     /// @param badWords A list of bad words tokens. Each "word" can be composed of multiple tokens
     /// @param stopWords A list of stop words tokens. Each "word" can be composed of multiple tokens
     /// @param embeddingBias The embedding bias tensor. Expected type is kFP32 and shape is [vocab_size]
-    /// @param speculativeDecodingConfig The speculative decoding configuration
+    /// @param externalDraftTokensConfig The speculative decoding configuration
     /// @param pTuningConfig The prompt tuning configuration
     /// @param loraConfig The LoRA configuration
     /// @param logitsPostProcessorName The logits postprocessor name. Must correspond to one of the logits postprocessor
     /// name provided to the ExecutorConfig.
+    /// @param encoderInputTokenIds The encoder input token ids for encoder-decoder models, or encoder-only models
     Request(VecTokens inputTokenIds, SizeType32 maxNewTokens, bool streaming = false,
         SamplingConfig const& samplingConfig = SamplingConfig(), OutputConfig const& outputConfig = OutputConfig(),
         std::optional<SizeType32> const& endId = std::nullopt, std::optional<SizeType32> const& padId = std::nullopt,
         std::optional<std::list<VecTokens>> badWords = std::nullopt,
         std::optional<std::list<VecTokens>> stopWords = std::nullopt,
         std::optional<Tensor> embeddingBias = std::nullopt,
-        std::optional<SpeculativeDecodingConfig> speculativeDecodingConfig = std::nullopt,
+        std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig = std::nullopt,
         std::optional<PromptTuningConfig> pTuningConfig = std::nullopt,
         std::optional<LoraConfig> loraConfig = std::nullopt,
-        std::optional<std::string> logitsPostProcessorName = std::nullopt);
+        std::optional<std::string> logitsPostProcessorName = std::nullopt,
+        std::optional<VecTokens> encoderInputTokenIds = std::nullopt);
 
     Request(Request const& other);
     Request(Request&& other) noexcept;
@@ -241,10 +279,11 @@ public:
     [[nodiscard]] std::optional<std::list<VecTokens>> getBadWords() const;
     [[nodiscard]] std::optional<std::list<VecTokens>> getStopWords() const;
     [[nodiscard]] std::optional<Tensor> getEmbeddingBias() const;
-    [[nodiscard]] std::optional<SpeculativeDecodingConfig> getSpeculativeDecodingConfig() const;
+    [[nodiscard]] std::optional<ExternalDraftTokensConfig> getExternalDraftTokensConfig() const;
     [[nodiscard]] std::optional<PromptTuningConfig> getPromptTuningConfig() const;
     [[nodiscard]] std::optional<LoraConfig> getLoraConfig() const;
     [[nodiscard]] std::optional<std::string> getLogitsPostProcessorName() const;
+    [[nodiscard]] std::optional<VecTokens> getEncoderInputTokenIds() const;
 
     void setStreaming(bool streaming);
     void setSamplingConfig(SamplingConfig const& config);
@@ -254,10 +293,11 @@ public:
     void setBadWords(std::list<VecTokens> const& badWords);
     void setStopWords(std::list<VecTokens> const& stopWords);
     void setEmbeddingBias(Tensor const& embeddingBias);
-    void setSpeculativeDecodingConfig(SpeculativeDecodingConfig const& specDecodingConfig);
+    void setExternalDraftTokensConfig(ExternalDraftTokensConfig const& externalDraftTokensConfig);
     void setPromptTuningConfig(PromptTuningConfig const& pTuningConfig);
     void setLoraConfig(LoraConfig const& loraConfig);
     void setLogitsPostProcessorName(std::string const& logitsPostProcessorName);
+    void setEncoderInputTokenIds(VecTokens const& encoderInputTokenIds);
 
 private:
     friend class Serialization;
@@ -285,6 +325,9 @@ struct Result
 
     /// @brief The context logits. Size [beamSize, maxNewTokens, vocabSizePadded]
     std::optional<Tensor> generationLogits;
+
+    /// @brief The encoder output. Size [encoderLen, hiddenSize]
+    std::optional<Tensor> encoderOutput;
 };
 
 /// @brief Class that holds either an error or a result
@@ -514,6 +557,95 @@ private:
     std::optional<size_t> mHostCacheSize;
 };
 
+/// @brief Configuration class for Lookahead decoding.
+class LookaheadDecodingConfig
+{
+public:
+    explicit LookaheadDecodingConfig(
+        SizeType32 maxNgramSize, SizeType32 maxWindowSize, SizeType32 maxVerificationSetSize);
+
+    bool operator==(LookaheadDecodingConfig const& other) const;
+
+    void setMaxNgramSize(SizeType32);
+    void setMaxWindowSize(SizeType32);
+    void setMaxVerificationSetSize(SizeType32);
+    [[nodiscard]] SizeType32 getMaxNgramSize() const;
+    [[nodiscard]] SizeType32 getMaxWindowSize() const;
+    [[nodiscard]] SizeType32 getMaxVerificationSetSize() const;
+
+private:
+    friend class Serialization;
+
+    // Number of tokens per NGram.
+    SizeType32 mMaxNgramSize;
+    // Number of NGrams in lookahead branch per step.
+    SizeType32 mMaxWindowSize;
+    // Number of NGrams in verification branch per step.
+    SizeType32 mMaxVerificationSetSize;
+};
+
+/// @brief Configuration class for explicit draft tokens decoding.
+class ExplicitDraftTokensConfig
+{
+public:
+    explicit ExplicitDraftTokensConfig(float temperature);
+
+    bool operator==(ExplicitDraftTokensConfig const& other) const;
+
+    void setTemperature(float);
+    [[nodiscard]] float getTemperature() const;
+
+private:
+    friend class Serialization;
+
+    // Sampling temperature.
+    float mTemperature;
+};
+
+/// @brief Configuration class for the speculative decoding.
+class DecodingConfig
+{
+public:
+    explicit DecodingConfig(std::optional<DecodingMode> decodingMode = std::nullopt,
+        std::optional<LookaheadDecodingConfig> lookaheadDecodingConfig = std::nullopt,
+        std::optional<MedusaChoices> medusaChoices = std::nullopt,
+        std::optional<ExplicitDraftTokensConfig> explicitDraftTokensConfig = std::nullopt);
+
+    bool operator==(DecodingConfig const& other) const;
+
+    // Decoding mode.
+    /// @brief Sets decoding mode. Some modes require the use of their own setters.
+    void setDecodingMode(DecodingMode const&);
+    [[nodiscard]] std::optional<DecodingMode> getDecodingMode() const;
+
+    // Lookahead methods.
+    /// @brief Sets lookahead decoding mode and config.
+    void setLookaheadDecoding(LookaheadDecodingConfig const&);
+    [[nodiscard]] std::optional<LookaheadDecodingConfig> getLookaheadDecodingConfig() const;
+
+    // Medusa methods.
+    /// @brief Sets medusa mode and config.
+    void setMedusaChoices(MedusaChoices const&);
+    [[nodiscard]] std::optional<MedusaChoices> getMedusaChoices() const;
+
+    // ExplicitDraftTokens decoding methods.
+    /// @brief Sets explicit draft tokens decoding mode and config.
+    void setExplicitDraftTokens(ExplicitDraftTokensConfig const&);
+    [[nodiscard]] std::optional<ExplicitDraftTokensConfig> getExplicitDraftTokensConfig() const;
+
+private:
+    friend class Serialization;
+
+    // Decoding mode.
+    std::optional<DecodingMode> mDecodingMode;
+    // Lookahead params.
+    std::optional<LookaheadDecodingConfig> mLookaheadDecodingConfig;
+    // Medusa params.
+    std::optional<MedusaChoices> mMedusaChoices;
+    // Explicit draft tokens params.
+    std::optional<ExplicitDraftTokensConfig> mExplicitDraftTokensConfig;
+};
+
 /// @brief Configuration class for the model executor
 class ExecutorConfig
 {
@@ -526,8 +658,7 @@ public:
         std::optional<ParallelConfig> parallelConfig = std::nullopt,
         std::optional<PeftCacheConfig> const& peftCacheConfig = std::nullopt,
         std::optional<LogitsPostProcessorMap> logitsPostProcessorMap = std::nullopt,
-        std::optional<MedusaChoices> medusaChoices = std::nullopt,
-        std::optional<DecodingMode> decodingMode = std::nullopt, float gpuWeightsPercent = 1);
+        std::optional<DecodingConfig> decodingConfig = std::nullopt, float gpuWeightsPercent = 1);
 
     [[nodiscard]] SizeType32 getMaxBeamWidth() const;
     [[nodiscard]] SchedulerConfig getSchedulerConfig() const;
@@ -540,8 +671,7 @@ public:
     [[nodiscard]] std::optional<ParallelConfig> getParallelConfig() const;
     [[nodiscard]] std::optional<PeftCacheConfig> getPeftCacheConfig() const;
     [[nodiscard]] std::optional<LogitsPostProcessorMap> getLogitsPostProcessorMap() const;
-    [[nodiscard]] std::optional<MedusaChoices> getMedusaChoices() const;
-    [[nodiscard]] std::optional<DecodingMode> getDecodingMode() const;
+    [[nodiscard]] std::optional<DecodingConfig> getDecodingConfig() const;
     [[nodiscard]] float getGpuWeightsPercent() const;
 
     void setMaxBeamWidth(SizeType32 maxBeamWidth);
@@ -555,8 +685,7 @@ public:
     void setParallelConfig(ParallelConfig const& parallelConfig);
     void setPeftCacheConfig(PeftCacheConfig const& peftCacheConfig);
     void setLogitsPostProcessorMap(LogitsPostProcessorMap const& logitsPostProcessorMap);
-    void setMedusaChoices(MedusaChoices const& medusaChoices);
-    void setDecodingMode(DecodingMode decodingMode);
+    void setDecodingConfig(DecodingConfig const& decodingConfig);
     void setGpuWeightsPercent(float const& gpuWeightsPercent);
 
 private:
@@ -590,8 +719,8 @@ private:
     std::optional<ParallelConfig> mParallelConfig;
     std::optional<PeftCacheConfig> mPeftCacheConfig;
     std::optional<LogitsPostProcessorMap> mLogitsPostProcessorMap;
-    std::optional<MedusaChoices> mMedusaChoices;
-    std::optional<DecodingMode> mDecodingMode;
+    /// @brief Decoding configuration.
+    std::optional<DecodingConfig> mDecodingConfig;
     float mGpuWeightsPercent;
 };
 
@@ -607,10 +736,20 @@ public:
     /// @param comm An optional inter-process communicator configuration
     Executor(std::filesystem::path const& modelPath, ModelType modelType, ExecutorConfig const& executorConfig);
 
+    Executor(std::filesystem::path const& encoderModelPath, std::filesystem::path const& decoderModelPath,
+        ModelType modelType, ExecutorConfig const& executorConfig);
+
     Executor(std::vector<uint8_t> const& engineBuffer, std::string const& jsonConfigStr, ModelType modelType,
         ExecutorConfig const& executorConfig);
 
+    Executor(std::vector<uint8_t> const& encoderEngineBuffer, std::string const& encoderJsonConfigStr,
+        std::vector<uint8_t> const& decoderEngineBuffer, std::string const& decoderJsonConfigStr, ModelType modelType,
+        ExecutorConfig const& executorConfig);
+
     Executor(std::shared_ptr<Model> model, ExecutorConfig const& executorConfig);
+
+    Executor(
+        std::shared_ptr<Model> encoderModel, std::shared_ptr<Model> decoderModel, ExecutorConfig const& executorConfig);
 
     ~Executor();
 

@@ -61,6 +61,7 @@ class BuildConfig:
     parallel_attention: bool = None
     new_decoder_architecture: bool = None
     state_size: int = 0
+    state_dtype: Optional[str] = None
     conv_kernel: int = 0
     layer_types: List[str] = field(default_factory=list)
     rnn_hidden_size: int = 0
@@ -92,6 +93,7 @@ class EncDecBuildConfig:
     builder_opt: Optional[int] = None
     n_mels: Optional[int] = None
     skip_cross_qkv: bool = False
+    use_implicit_relative_attention: Optional[bool] = False
 
     def __post_init__(self) -> None:
         assert self.head_size is not None
@@ -479,6 +481,7 @@ _allowed_configs = {
                 build_config=BuildConfig(
                     num_layers=32,
                     num_heads=32,
+                    num_kv_heads=8,
                     hidden_size=4096,
                     vocab_size=32000,
                     hidden_act='swiglu',
@@ -503,7 +506,7 @@ _allowed_configs = {
                     hidden_act='gelu',
                     n_positions=1024,
                     rotary_dim=64,
-                    max_batch_size=256,
+                    max_batch_size=128,
                     max_input_len=512,
                     max_output_len=200,
                     builder_opt=None,
@@ -582,6 +585,25 @@ _allowed_configs = {
                     builder_opt=None,
                     remove_input_padding=False,
                 )),
+    "glm_10b":
+    ModelConfig(name="glm_10b",
+                family="glm",
+                benchmark_type="gpt",
+                build_config=BuildConfig(
+                    num_layers=48,
+                    num_heads=64,
+                    num_kv_heads=64,
+                    hidden_size=4096,
+                    inter_size=16384,
+                    vocab_size=50304,
+                    hidden_act='gelu',
+                    n_positions=1024,
+                    max_batch_size=128,
+                    max_input_len=1024,
+                    max_output_len=256,
+                    builder_opt=None,
+                    remove_input_padding=False,
+                )),
     "bloom_560m":
     ModelConfig(name="bloom_560m",
                 family="bloom",
@@ -593,7 +615,7 @@ _allowed_configs = {
                     vocab_size=250880,
                     hidden_act=None,
                     n_positions=2048,
-                    max_batch_size=8,
+                    max_batch_size=32,
                     max_input_len=1024,
                     max_output_len=1024,
                     builder_opt=None,
@@ -1327,6 +1349,7 @@ _allowed_configs = {
                     layer_types=["recurrent", "recurrent", "attention"],
                     rnn_hidden_size=2560,
                     logits_soft_cap=30.0,
+                    state_dtype="float32",
                 )),
 }
 

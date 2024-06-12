@@ -113,13 +113,20 @@ python .\scripts\build_wheel.py -a "89-real" --trt_root C:\workspace\TensorRT-10
 
             2. Close and re-open any existing PowerShell or Git Bash windows so they pick up the new `Path`.
 
-            3. Install the TensorRT core libraries, run PowerShell, and use `pip` to install the Python wheel.
+            3. Remove existing `tensorrt` wheels first by executing
+
+            ```bash
+            pip uninstall -y tensorrt tensorrt_libs tensorrt_bindings
+            pip uninstall -y nvidia-cublas-cu12 nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12
+            ```
+
+            4. Install the TensorRT core libraries, run PowerShell, and use `pip` to install the Python wheel.
 
             ```bash
             pip install %USERPROFILE%\inference\TensorRT\python\tensorrt-*.whl
             ```
 
-            4. Verify that your TensorRT installation is working properly.
+            5. Verify that your TensorRT installation is working properly.
 
             ```bash
             python -c "import tensorrt as trt; print(trt.__version__)"
@@ -181,7 +188,7 @@ Building from source produces the following library files.
 The locations of the DLLs, in addition to some `torch` DLLs, must be added to the Windows `Path` in order to use the TensorRT-LLM C++ runtime. Append the locations of these libraries to your `Path`. When complete, your `Path` should include lines similar to these:
 
 ```bash
-%USERPROFILE%\inference\TensorRT-LLM\cpp\build\tensorrt_llm\Release
+%USERPROFILE%\inference\TensorRT-LLM\cpp\build\tensorrt_llm
 %USERPROFILE%\AppData\Local\Programs\Python\Python310\Lib\site-packages\tensorrt_llm\libs
 %USERPROFILE%\AppData\Local\Programs\Python\Python310\Lib\site-packages\torch\lib
 ```

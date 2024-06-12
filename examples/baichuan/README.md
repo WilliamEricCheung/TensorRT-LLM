@@ -99,6 +99,7 @@ python convert_checkpoint.py --model_version v1_13b \
                              --output_dir ./tmp/baichuan_v1_13b/trt_ckpts/int8_weight_only/1-gpu/
 
 # Convert the Baichuan V1 13B model using a single GPU and apply INT4 weight-only quantization.
+# Note that Baichuan V1 7B performs not well when using INT4 weight-only quantization.
 python convert_checkpoint.py --model_version v1_13b \
                              --model_dir baichuan-inc/Baichuan-13B-Chat \
                              --dtype float16 \
@@ -218,7 +219,6 @@ python ../quantization/quantize.py --model_dir baichuan-inc/Baichuan-13B-Chat \
                                    --kv_cache_dtype int8 \
                                    --output_dir ./trt_ckpt/baichuan_int4wo_int8kv_tp1 \
                                    --calib_size 512 \
-                                   --strongly_typed
 ```
 
 **INT8 KV cache + AWQ**

@@ -67,6 +67,15 @@ class Mapping(object):
         self.tp_group = self.tp_groups[self.pp_rank]
         self.pp_group = self.pp_groups[self.tp_rank]
 
+        self.node_rank = self.rank // self.gpus_per_node
+        self.local_rank = self.rank % self.gpus_per_node
+
+    def get_node_rank(self, rank: int):
+        return rank // self.gpus_per_node
+
+    def get_local_rank(self, rank: int):
+        return rank % self.gpus_per_node
+
     def has_tp(self):
         return self.tp_size > 1
 
@@ -102,3 +111,16 @@ class Mapping(object):
         experts_range = range(self.tp_rank * experts_per_rank,
                               (self.tp_rank + 1) * experts_per_rank)
         return list(experts_range)
+
+    @classmethod
+    def from_dict(cls, mapping: dict):
+        return cls(**mapping)
+
+    def to_dict(self):
+        return {
+            'world_size': self.world_size,
+            'rank': self.rank,
+            'gpus_per_node': self.gpus_per_node,
+            'tp_size': self.tp_size,
+            'pp_size': self.pp_size
+        }

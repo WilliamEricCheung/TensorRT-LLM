@@ -1,8 +1,24 @@
+/*
+ * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #pragma once
 
 #include <gtest/gtest.h>
 #include <list>
 
+#include "tensorrt_llm/layers/lookaheadDecodingUtils.h"
 #include "tensorrt_llm/runtime/runtimeKernels.h"
 
 namespace tensorrt_llm::tests::layers
@@ -17,10 +33,14 @@ TensorPtr initTensor(std::string str, std::optional<ITensor::Shape> shape = std:
 class RandomTokenLogits
 {
 public:
-    RandomTokenLogits(std::string vocabulary)
-        : mVocabulary(initTensor(vocabulary))
+    RandomTokenLogits(TensorPtr vocab)
+        : mVocabulary(vocab)
     {
-        TLLM_CHECK(vocabulary.size() > 2);
+    }
+
+    RandomTokenLogits(std::string vocab)
+        : mVocabulary(initTensor(vocab))
+    {
     }
 
     TensorPtr tokenToLogits(TokenIdType token) const;
@@ -38,21 +58,50 @@ public:
 
     SizeType32 getVocabSize() const;
     //! @return the last token in mVocabulary as invalid token;
-    TokenIdType getInvalidToken() const;
+    virtual TokenIdType getInvalidToken() const;
     //! @return the second-to-last token in mVocabulary as end token;
-    TokenIdType getEndToken() const;
+    virtual TokenIdType getEndToken() const;
 
 private:
     TensorPtr const mVocabulary;
+};
+
+//! vocabulary is ascii table from 0 to 127. tokenId == token.
+class AsciiRandomTokenLogits : public RandomTokenLogits
+{
+public:
+    AsciiRandomTokenLogits()
+        : RandomTokenLogits(
+            []()
+            {
+                auto vocab = BufferManager::cpu(ITensor::makeShape({128}), nvinfer1::DataType::kINT32);
+                auto vocabRange = BufferRange<TokenIdType>(*vocab);
+                TokenIdType token{0};
+                std::for_each(vocabRange.begin(), vocabRange.end(), [&token](auto& v) { v = token++; });
+                return vocab;
+            }())
+    {
+    }
+
+    virtual TokenIdType getInvalidToken() const
+    {
+        return static_cast<TokenIdType>('#');
+    }
+
+    virtual TokenIdType getEndToken() const
+    {
+        return static_cast<TokenIdType>('&');
+    }
 };
 
 //! random LLM to simulate functions of a real LLM.
 class RandomLlm
 {
 public:
-    RandomLlm(std::shared_ptr<RandomTokenLogits> table, std::string oracle)
+    RandomLlm(std::shared_ptr<RandomTokenLogits> table, std::string oracle, runtime::SizeType32 id = 0)
         : mTable(table)
         , mOracle(initTensor(oracle))
+        , mId(id)
     {
     }
 
@@ -70,14 +119,15 @@ public:
 protected:
     std::shared_ptr<RandomTokenLogits> mTable;
     TensorPtr mOracle;
+    runtime::SizeType32 mId;
 };
 
 //! a lookahead implementation for RandomLlm.
 class LookaheadRandomLlm : public RandomLlm
 {
 public:
-    LookaheadRandomLlm(std::shared_ptr<RandomTokenLogits> table, std::string oracle)
-        : RandomLlm(table, oracle)
+    LookaheadRandomLlm(std::shared_ptr<RandomTokenLogits> table, std::string oracle, runtime::SizeType32 id = 0)
+        : RandomLlm(table, oracle, id)
     {
     }
 

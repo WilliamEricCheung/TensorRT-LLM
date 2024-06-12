@@ -1,6 +1,8 @@
 # Phi
 
-This document explains how to build the [phi-2](https://huggingface.co/microsoft/phi-2), [Phi-3-mini-4k-instruct](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct) and [Phi-3-mini-128k-instruct](https://huggingface.co/microsoft/Phi-3-mini-128k-instruct) models using TensorRT-LLM and run on a single GPU.
+This document explains how to build the [phi-2](https://huggingface.co/microsoft/phi-2), [Phi-3-mini-4k-instruct](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct),
+[Phi-3-mini-128k-instruct](https://huggingface.co/microsoft/Phi-3-mini-128k-instruct), [Phi-3-small-8k-instruct](https://huggingface.co/microsoft/Phi-3-small-8k-instruct), [Phi-3-small-128k-instruct](https://huggingface.co/microsoft/Phi-3-small-128k-instruct), [Phi-3-medium-4k-instruct](https://huggingface.co/microsoft/Phi-3-medium-4k-instruct/) and [Phi-3-medium-128k-instruct](https://huggingface.co/microsoft/Phi-3-medium-128k-instruct/)
+models using TensorRT-LLM and run on a single GPU.
 
 - [Phi](#phi)
   - [Overview](#overview)
@@ -13,9 +15,10 @@ This document explains how to build the [phi-2](https://huggingface.co/microsoft
 
 ## Overview
 
-The TensorRT-LLM Phi implementation can be found in [`tensorrt_llm/models/phi/model.py`](../../tensorrt_llm/models/phi/model.py) and [`tensorrt_llm/models/phi3/model.py`](../../tensorrt_llm/models/phi3/model.py). The TensorRT-LLM Phi example code is located in [`examples/phi`](./). There is one file:
+The TensorRT-LLM Phi implementation can be found in [`tensorrt_llm/models/phi/model.py`](../../tensorrt_llm/models/phi/model.py) and [`tensorrt_llm/models/phi3/model.py`](../../tensorrt_llm/models/phi3/model.py). The TensorRT-LLM Phi example code is located in [`examples/phi`](./). There are two files:
 
 * [`convert_checkpoint.py`](./convert_checkpoint.py) to convert a checkpoint from the [HuggingFace (HF) Transformers](https://github.com/huggingface/transformers) format to the TensorRT-LLM format
+* [`postprocess_quant_checkpoint.py`](./postprocess_quant_checkpoint.py) to post-process FP8 or INT8 SmoothQuant quantized checkpoints for Phi-3-small variants.
 
 In addition, there are two shared files in the parent folder [`examples`](../) for inference and evaluation:
 
@@ -25,14 +28,19 @@ In addition, there are two shared files in the parent folder [`examples`](../) f
 ## Support Matrix
   * FP16
   * BF16
+  * FP8
   * Tensor Parallel
   ## Support Matrix
 
-|    Model Name    | FP16  | BF16  |  TP   |
-| :--------------: | :---: | :---: | :---: |
-|    phi-2    |   Y   |   Y    |   Y   |
-| Phi-3-mini-4k-instruct    |   Y   |   Y   |     |
-| Phi-3-mini-128k-instruct  |   Y   |   Y   |    |
+|    Model Name    | FP16  | BF16  | FP8   |  TP   |
+| :--------------: | :---: | :---: | :---: | :---: |
+|    phi-2    |   Y   |   Y    |   |  Y   |
+| Phi-3-mini-4k-instruct    |   Y   |   Y   |  |  |
+| Phi-3-mini-128k-instruct  |   Y   |   Y   |  |  |
+| Phi-3-small-8k-instruct   |   Y   |   Y   | Y   | Y  |
+| Phi-3-small-128k-instruct |   Y   |   Y   | Y   | Y  |
+| Phi-3-medium-8k-instruct   |   Y   |   Y   | |   | Y  |
+| Phi-3-medium-128k-instruct   |   Y   |   Y   | |   | Y  |
 
 * Model Name: the name of the model, the same as the name on HuggingFace
 * TP: Tensor Parallel
@@ -48,9 +56,8 @@ pip install -r requirements.txt
 ```
 
 ```bash
-export MODEL_TYPE="phi-2" # or Phi-3-mini-4k-instruct, Phi-3-mini-128k-instruct
-python ./convert_checkpoint.py --model_type ${MODEL_TYPE} \
-                    --model_dir "microsoft/${MODEL_TYPE}" \
+python ./convert_checkpoint.py \
+                    --model_dir /path/to/phi-model \
                     --output_dir ./phi-checkpoint \
                     --dtype float16
 ```
@@ -100,7 +107,7 @@ The summarization can be done using the [`../summarize.py`](../summarize.py) scr
 ```bash
 # Run the summarization task using a TensorRT-LLM model and a single GPU.
 python3 ../summarize.py --engine_dir ./phi-engine \
-                        --hf_model_dir "microsoft/$(MODEL_TYPE)" \
+                        --hf_model_dir /path/to/phi-model \
                         --batch_size 1 \
                         --test_trt_llm \
                         --test_hf \
@@ -111,7 +118,7 @@ python3 ../summarize.py --engine_dir ./phi-engine \
 # Run the summarization task using a TensorRT-LLM model and 2-way tensor parallelism.
 mpirun -n 2 --allow-run-as-root                             \
 python3 ../summarize.py --engine_dir ./phi-engine-tp2  \
-                        --hf_model_dir "microsoft/$(MODEL_TYPE)"    \
+                        --hf_model_dir /path/to/phi-model    \
                         --batch_size 1                      \
                         --test_hf                           \
                         --test_trt_llm                      \
@@ -119,3 +126,37 @@ python3 ../summarize.py --engine_dir ./phi-engine-tp2  \
                         --check_accuracy                    \
                         --tensorrt_llm_rouge1_threshold 20
 ```
+
+
+### 5. Quantization options for Phi-3-small
+
+Phi-3-small variants support post-training quantization to FP8 and INT8 SmoothQuant formats.
+
+FP8 checkpoints can be built as follows:
+
+```bash
+DTYPE=bfloat16
+python3 ../quantization/quantize.py \
+       --model_dir phi3-model \
+       --output_dir ./phi3-checkpoint \
+       --dtype $DTYPE \
+       --qformat fp8 --kv_cache_dtype fp8
+
+python3 postprocess_quant_checkpoint.py --checkpoint_dir ./phi3-checkpoint
+```
+
+INT8 checkpoints can be built as follows:
+
+```bash
+DTYPE=bfloat16
+python3 ../quantization/quantize.py \
+       --model_dir phi3-model \
+       --output_dir ./phi3-checkpoint \
+       --dtype $DTYPE \
+       --qformat int8_sq --kv_cache_dtype int8
+
+python3 postprocess_quant_checkpoint.py --checkpoint_dir ./phi3-checkpoint
+```
+
+The commands to [build TensorRT engines](#2-build-tensorrt-engines) from quantized checkpoints
+and to run [summarization test](#3-summarization-using-the-phi-model) are same as those for unquantized checkpoints.

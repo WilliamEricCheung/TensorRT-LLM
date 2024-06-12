@@ -69,6 +69,13 @@ def parse_arguments():
         'You must also use --use_weight_only for that argument to have an impact.'
     )
     parser.add_argument(
+        '--calib_dataset',
+        type=str,
+        default='ccdv/cnn_dailymail',
+        help=
+        "The huggingface dataset name or the local directory of the dataset for calibration."
+    )
+    parser.add_argument(
         "--smoothquant",
         "-sq",
         type=float,
@@ -173,7 +180,10 @@ def args_to_quantization(args: argparse.Namespace) -> QuantConfig:
     '''return config dict with quantization info based on the command line args
     '''
     quant_config = QuantConfig()
-    quant_config.exclude_modules = ['lm_head']
+    quant_config.exclude_modules = [
+        'lm_head', 'router', 'vocab_embedding', 'position_embedding',
+        'block_embedding'
+    ]
     if args.use_weight_only:
         if args.weight_only_precision == 'int8':
             quant_config.quant_algo = QuantAlgo.W8A16
@@ -241,7 +251,7 @@ def from_cli_args(args):
             'tp_size': args.tp_size,
             'pp_size': args.pp_size
         },
-        'quantization': args_to_quantization(args).asdict()
+        'quantization': args_to_quantization(args).to_dict()
     }
     config.update(args_to_build_options(args))
     return config
@@ -289,6 +299,7 @@ def convert_and_save_hf(args):
                  args.output_dir,
                  mapping=mapping,
                  quantization=quantization,
+                 calib_dataset=args.calib_dataset,
                  override_fields=override_fields,
                  dataset_cache_dir=args.dataset_cache_dir,
                  smoothquant_val=args.smoothquant,

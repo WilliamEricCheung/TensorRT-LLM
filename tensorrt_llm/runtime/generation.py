@@ -14,9 +14,7 @@
 # limitations under the License.
 
 import copy
-import csv
 import math
-import os
 import platform
 from dataclasses import dataclass, field
 from functools import reduce, wraps
@@ -45,41 +43,58 @@ from .kv_cache_manager import GenerationSequence, KVCacheManager, KVCacheUpdater
 from .session import _scoped_stream
 
 
-def to_word_list_format(word_dict: List[List[str]],
-                        tokenizer=None,
-                        add_special_tokens=False):
+def decode_words_list(word_dict: List[List[str]],
+                      tokenizer=None,
+                      add_special_tokens=False):
     '''
     format of word_dict
         len(word_dict) should be same to batch_size
         word_dict[i] means the words for batch i
-        len(word_dict[i]) must be 1, which means it only contains 1 string
-        This string can contains several sentences and split by ",".
-        For example, if word_dict[2] = " I am happy, I am sad", then this function will return
-        the ids for two short sentences " I am happy" and " I am sad".
+        len(word_dict[i]) >= 1, which means it must contain at least 1 string
+        For example, word_dict[2] = [" I am happy", " I am sad"].
     '''
     assert tokenizer != None, "need to set tokenizer"
 
-    flat_ids = []
-    offsets = []
+    decoded_words_batch = []
     for word_dict_item in word_dict:
-        item_flat_ids = []
-        item_offsets = []
+        decoded_words_request = []
 
-        if isinstance(word_dict_item[0], bytes):
-            word_dict_item = [word_dict_item[0].decode()]
+        for item in word_dict_item:
+            if isinstance(item, bytes):
+                item = [item.decode()]
 
-        words = list(csv.reader(word_dict_item))[0]
-        for word in words:
-            ids = tokenizer.encode(word, add_special_tokens=add_special_tokens)
+            ids = tokenizer.encode(item, add_special_tokens=add_special_tokens)
 
             if len(ids) == 0:
                 continue
 
-            item_flat_ids += ids
-            item_offsets.append(len(ids))
+            decoded_words_request.append(ids)
+        decoded_words_batch.append(decoded_words_request)
 
-        flat_ids.append(np.array(item_flat_ids))
-        offsets.append(np.cumsum(np.array(item_offsets)))
+    return decoded_words_batch
+
+
+def to_word_list_format(word_dict: List[List[List[int]]]):
+    '''
+    format of word_dict
+        len(word_dict) should be same to batch_size
+        word_dict[i] means the words for batch i
+        len(word_dict[i]) >= 1, which means it must contain at least 1 word
+        For example, word_dict[2] = [[1, 267], [534]] has two words.
+    '''
+
+    flat_ids = []
+    offsets = []
+    for word_dict_item in word_dict:
+        items_flat_ids = []
+        items_offsets = []
+
+        for ids in word_dict_item:
+            items_flat_ids += ids
+            items_offsets.append(len(ids))
+
+        flat_ids.append(np.array(items_flat_ids))
+        offsets.append(np.cumsum(np.array(items_offsets)))
 
     pad_to = max(1, max(len(ids) for ids in flat_ids))
 
@@ -478,6 +493,8 @@ class SamplingConfig:
     random_seed: Union[int, torch.Tensor] = field(init=False, default=None)
     output_cum_log_probs: bool = field(init=False, default=False)
     output_log_probs: bool = field(init=False, default=False)
+    no_repeat_ngram_size: Union[int, torch.Tensor] = field(init=False,
+                                                           default=None)
 
     def update(self, **kwargs):
         unused_kwargs = dict()
@@ -1142,6 +1159,18 @@ class GenerationSession(object):
         else:
             self.random_seed = None
 
+        if isinstance(scfg.no_repeat_ngram_size, torch.Tensor):
+            assert scfg.no_repeat_ngram_size.dtype == torch.int32, f"scfg.no_repeat_ngram_size.dtype ({scfg.no_repeat_ngram_size.dtype}) must be torch.int32"
+            assert scfg.no_repeat_ngram_size.shape[
+                0] == batch_size, f"scfg.no_repeat_ngram_size.shape[0] ({scfg.no_repeat_ngram_size.shape[0]}) must equal to batch_size ({batch_size})"
+            self.no_repeat_ngram_size = scfg.no_repeat_ngram_size
+        elif scfg.no_repeat_ngram_size is not None:
+            self.no_repeat_ngram_size = torch.full([batch_size],
+                                                   scfg.no_repeat_ngram_size,
+                                                   dtype=torch.int32)
+        else:
+            self.no_repeat_ngram_size = None
+
         if self.mapping.is_last_pp_rank():
             self.dynamic_decoder.setup(
                 batch_size, scfg.num_beams, self.top_k, self.top_p,
@@ -1149,7 +1178,9 @@ class GenerationSession(object):
                 self.presence_penalty, self.frequency_penalty, self.min_length,
                 self.host_length_penalty, self.host_early_stopping,
                 self.beam_search_diversity_rate, self.random_seed,
-                self.top_p_decay, self.top_p_min, self.top_p_reset_ids)
+                self.top_p_decay, self.top_p_min, self.top_p_reset_ids,
+                self.no_repeat_ngram_size, scfg.output_log_probs,
+                scfg.num_beams > 1 or scfg.output_cum_log_probs)
 
         assert scfg.end_id is not None, "end_id cannot be none"
         assert scfg.pad_id is not None, 'pad_id cannot be none'
@@ -1560,24 +1591,22 @@ class GenerationSession(object):
         else:
             # Without plugin, we need extra kv cache buffers.
             # Because we don't support inplace update, so we need separate buffer for inputs and outputs.
-            # Not applicable to cross KV buffers as it's constant
-            for i in range(self.first_layer, self.last_layer):
-                if self.layer_types[i] == 'attention':
-                    trt_dtype = self.runtime.engine.get_tensor_dtype(
-                        f'present_key_value_{i}')
+            # We can do reuse between different layers' inputs and outputs, i.e. current layer's output can
+            # reuse previous layer's input memory. But this need one extra buffer as the guard.
+            i = self.first_layer
+            if self.layer_types[
+                    i] == 'attention':  # Not applicable to cross KV buffers as it's constant
+                trt_dtype = self.runtime.engine.get_tensor_dtype(
+                    f'present_key_value_{i}')
 
-                    if trt_dtype == trt.fp8:
-                        # PyTorch doesn't support fp8 datatype, use int8 instead of it because int8 datatype size is same with fp8.
-                        # TODO: Remove this section when PyTorch support fp8 datatype
-                        dtype = torch.int8
-                    else:
-                        dtype = self._tensor_dtype(f'present_key_value_{i}')
-                    self.buffer[f'1_present_key_value_{i}'] = torch.empty(
-                        cache_shape, dtype=dtype, device=self.device)
-                    if os.getenv('TRTLLM_DISABLE_OOTB_KVCACHE_REUSE') != 'ON':
-                        # We can do reuse between different layers' inputs and outputs, i.e. current layer's output can
-                        # reuse previous layer's input memory. But this need one extra buffer as the guard.
-                        break
+                if trt_dtype == trt.fp8:
+                    # PyTorch doesn't support fp8 datatype, use int8 instead of it because int8 datatype size is same with fp8.
+                    # TODO: Remove this section when PyTorch support fp8 datatype
+                    dtype = torch.int8
+                else:
+                    dtype = self._tensor_dtype(f'present_key_value_{i}')
+                self.buffer[f'1_present_key_value_{i}'] = torch.empty(
+                    cache_shape, dtype=dtype, device=self.device)
 
         if self.use_mamba_conv1d_plugin:
             conv_state_shape = (
@@ -1992,11 +2021,12 @@ class GenerationSession(object):
                     add_tensor(self.cross_qkv_reuse, 'cross_qkv_reuse')
                 else:
                     # minimize
-                    # hacky way: such that qkv gemm becomes a gemv which is cheap and negligible
+                    # use TensorRT Empty Tensor to skip redundant computation
+                    # 0 for generation phase, >0 for context phase
                     encoder_output_shape = [
-                        1, encoder_output.shape[-1]
+                        0, encoder_output.shape[-1]
                     ] if self.remove_input_padding else [
-                        1, 1, encoder_output.shape[-1]
+                        1, 0, encoder_output.shape[-1]
                     ]
             else:
                 # OOTB path doesn't have kv cache for now, so this encoder_output is
@@ -2055,32 +2085,28 @@ class GenerationSession(object):
                         idx] == 'attention':
                     next_shape = (batch_size * beam_width, 2, self.num_heads_kv,
                                   max_context_length + step, self.head_size)
-                    if os.getenv("TRTLLM_DISABLE_OOTB_KVCACHE_REUSE") != 'ON':
-                        # We will make current layer's output KV-cache overwrite previous layers input KV-cache
-                        # buffer id: ...  5,  6,  7,  8,  9, ...
-                        # layer n:        out in
-                        # layer n+1:          out in
-                        # layer n+2               out in
-                        # And when finish a step, we will make every layer's in/out buffer index subtract 1 in
-                        # a circular buffer way to make sure current outputs become next step's inputs.
-                        buffer_num = self.num_attn_layers + 1  # attention layer num + 1 extra buffer.
-                        # Subtract 1 for every step.
-                        input_ind = attn_layer_idx - (step % buffer_num)
-                        # When underflow, go to the back to achieve a circular buffers.
-                        if input_ind < 0:
-                            input_ind = self.num_attn_layers + 1 + input_ind
-                        # Output buffer is just before input buffer. When input is buffer 0, output should use the back buffer to achieve circular buffers.
-                        output_ind = input_ind - 1 if input_ind > 0 else self.num_attn_layers
+                    # We will make current layer's output KV-cache overwrite previous layers input KV-cache
+                    # buffer id: ...  5,  6,  7,  8,  9, ...
+                    # layer n:        out in
+                    # layer n+1:          out in
+                    # layer n+2               out in
+                    # And when finish a step, we will make every layer's in/out buffer index subtract 1 in
+                    # a circular buffer way to make sure current outputs become next step's inputs.
+                    buffer_num = self.num_attn_layers + 1  # attention layer num + 1 extra buffer.
+                    # Subtract 1 for every step.
+                    input_ind = attn_layer_idx - (step % buffer_num)
+                    # When underflow, go to the back to achieve a circular buffers.
+                    if input_ind < 0:
+                        input_ind = self.num_attn_layers + 1 + input_ind
+                    # Output buffer is just before input buffer. When input is buffer 0, output should use the back buffer to achieve circular buffers.
+                    output_ind = input_ind - 1 if input_ind > 0 else self.num_attn_layers
 
-                        # We only allocate layer num of normal buffers. If index is overflow, use the extra buffer.
-                        input_name = f'present_key_value_{self.attn_to_general_idx[input_ind]}' if input_ind != self.num_attn_layers \
-                            else f'1_present_key_value_{self.attn_to_general_idx[0]}'
-                        output_name = f'present_key_value_{self.attn_to_general_idx[output_ind]}' if output_ind != self.num_attn_layers \
-                            else f'1_present_key_value_{self.attn_to_general_idx[0]}'
-                        attn_layer_idx += 1
-                    else:
-                        input_name = f'1_present_key_value_{idx}' if step % 2 else f'present_key_value_{idx}'
-                        output_name = f'present_key_value_{idx}' if step % 2 else f'1_present_key_value_{idx}'
+                    # We only allocate layer num of normal buffers. If index is overflow, use the extra buffer.
+                    input_name = f'present_key_value_{self.attn_to_general_idx[input_ind]}' if input_ind != self.num_attn_layers \
+                        else f'1_present_key_value_{self.attn_to_general_idx[0]}'
+                    output_name = f'present_key_value_{self.attn_to_general_idx[output_ind]}' if output_ind != self.num_attn_layers \
+                        else f'1_present_key_value_{self.attn_to_general_idx[0]}'
+                    attn_layer_idx += 1
 
                     add_tensor_with_shape(self.buffer[input_name],
                                           f'past_key_value_{idx}', next_shape)
@@ -2352,8 +2378,9 @@ class GenerationSession(object):
             final_output_ids = self.gather_tree(
                 self.sequence_length_buffer, self.output_ids, self.parent_ids,
                 self.end_ids, context_lengths, self.cum_log_probs,
-                *beam_hyps_args, self.finished, self.length_penalty, batch_size,
-                beam_width, self.max_seq_length, scfg.use_beam_hyps)
+                self.log_probs, self.log_probs_tiled, *beam_hyps_args,
+                self.finished, self.length_penalty, batch_size, beam_width,
+                self.max_seq_length, scfg.use_beam_hyps)
 
         # Communicate ranks in Pipeline Parallelism
         if self.mapping.has_pp():
@@ -2625,7 +2652,7 @@ class GenerationSession(object):
             sequence_limit_lengths: torch.Tensor,
             sequence_lengths: torch.Tensor,
             next_step_tensors: Dict[str, RuntimeTensor], stop_words_data,
-            bad_words_data, no_repeat_ngram_size, encoder_output: torch.Tensor,
+            bad_words_data, encoder_output: torch.Tensor,
             encoder_input_lengths: torch.Tensor,
             stopping_criteria: StoppingCriteria,
             logits_processor: LogitsProcessor, **kwargs):
@@ -2674,6 +2701,7 @@ class GenerationSession(object):
                 host_cross_kv_cache_block_offsets, hidden_states,
                 prompt_embedding_table, tasks, prompt_vocab_size,
                 encoder_output, encoder_input_lengths)
+
             context = self.runtime.ctx_context
             self.runtime._set_tensors(context, ctx_tensors)
             if self.debug_mode:
@@ -2837,6 +2865,7 @@ class GenerationSession(object):
                 host_cross_kv_cache_block_offsets, hidden_states,
                 prompt_embedding_table, tasks, prompt_vocab_size,
                 encoder_output, encoder_input_lengths)
+
             # there are some tensors created inside the _get_next_step_shape_buffer, not owned by any object
             # needs to pro-long the life time of the tensors inside the next_step_tensors array
             # otherwise, it maybe released before the next step actually enqueued
@@ -2886,11 +2915,11 @@ class GenerationSession(object):
                         context_lengths, sequence_limit_lengths,
                         stop_words_list_ptrs, stop_words_lens,
                         max_stop_words_len, bad_words_list_ptrs, bad_words_lens,
-                        max_bad_words_len, no_repeat_ngram_size,
-                        this_src_cache_indirection, self.output_ids,
-                        self.new_tokens, self.finished, self.finished,
-                        self.sequence_length_buffer, self.cum_log_probs,
-                        self.log_probs, self.log_probs_tiled, self.parent_ids,
+                        max_bad_words_len, this_src_cache_indirection,
+                        self.output_ids, self.new_tokens, self.finished,
+                        self.finished, self.sequence_length_buffer,
+                        self.cum_log_probs, self.log_probs,
+                        self.log_probs_tiled, self.parent_ids,
                         this_tgt_cache_indirection,
                         self.beam_hyps_output_ids_cba,
                         self.beam_hyps_seq_len_cba,
@@ -2986,7 +3015,6 @@ class GenerationSession(object):
                        sequence_limit_lengths: torch.Tensor,
                        stop_words_data,
                        bad_words_data,
-                       no_repeat_ngram_size,
                        output_sequence_lengths: bool = False,
                        return_dict: bool = False,
                        encoder_output: torch.Tensor = None,
@@ -3051,9 +3079,8 @@ class GenerationSession(object):
                 host_context_lengths, attention_mask, cross_attention_mask,
                 prompt_vocab_size, ite, sequence_limit_lengths,
                 sequence_lengths, next_step_tensors, stop_words_data,
-                bad_words_data, no_repeat_ngram_size, encoder_output,
-                encoder_input_lengths, stopping_criteria, logits_processor,
-                **kwargs)
+                bad_words_data, encoder_output, encoder_input_lengths,
+                stopping_criteria, logits_processor, **kwargs)
             if step == 0:
                 if benchmark_profiler is not None:
                     benchmark_profiler.record_cuda_event('first_token')
@@ -3071,6 +3098,10 @@ class GenerationSession(object):
                 if self.is_medusa_mode:
                     # just hack away for now
                     final_output_ids = self.output_ids.clone().unsqueeze(1)
+                    final_output_ids = final_output_ids[:, :, :self.
+                                                        max_seq_length -
+                                                        self._model_config.
+                                                        max_medusa_tokens]
                 else:
                     final_output_ids = self.finalize_decoder(
                         context_lengths, batch_size, beam_width, scfg)
@@ -3129,7 +3160,6 @@ class GenerationSession(object):
                       sequence_limit_lengths: torch.Tensor,
                       stop_words_data,
                       bad_words_data,
-                      no_repeat_ngram_size,
                       output_sequence_lengths: bool = False,
                       return_dict: bool = False,
                       encoder_output: torch.Tensor = None,
@@ -3168,8 +3198,8 @@ class GenerationSession(object):
                 host_context_lengths, attention_mask, cross_attention_mask,
                 prompt_vocab_size, ite, sequence_limit_lengths,
                 sequence_lengths, next_step_tensors, stop_words_data,
-                bad_words_data, no_repeat_ngram_size, encoder_output,
-                encoder_input_lengths, stopping_criteria, logits_processor)
+                bad_words_data, encoder_output, encoder_input_lengths,
+                stopping_criteria, logits_processor)
             if step == 0:
                 outputs_context_logits = context_logits
             if should_stop is not None:
@@ -3225,7 +3255,6 @@ class GenerationSession(object):
                prompt_vocab_size: torch.Tensor = None,
                stop_words_list=None,
                bad_words_list=None,
-               no_repeat_ngram_size=None,
                streaming: bool = False,
                output_sequence_lengths: bool = False,
                return_dict: bool = False,
@@ -3388,6 +3417,7 @@ class GenerationSession(object):
         stop_words_list_ptrs = None
         max_stop_words_len = 0
         if stop_words_list is not None:
+            stop_words_list = torch.from_numpy(stop_words_list).to('cuda')
             max_stop_words_len = stop_words_list.shape[2]
             stop_words_lens = torch.full((batch_size, ),
                                          max_stop_words_len,
@@ -3395,7 +3425,8 @@ class GenerationSession(object):
             stop_words_list_ptrs = torch.zeros((batch_size), dtype=torch.int64)
             for bi in range(batch_size):
                 stop_words_list_ptrs[bi] = stop_words_list.data_ptr(
-                ) + bi * 2 * max_stop_words_len
+                ) + bi * 2 * max_stop_words_len * stop_words_list.element_size(
+                )
             stop_words_list_ptrs = stop_words_list_ptrs.to('cuda')
         stop_words_data = (stop_words_list_ptrs, stop_words_lens,
                            max_stop_words_len)
@@ -3404,6 +3435,7 @@ class GenerationSession(object):
         bad_words_list_ptrs = None
         max_bad_words_len = 0
         if bad_words_list is not None:
+            bad_words_list = torch.from_numpy(bad_words_list).to('cuda')
             max_bad_words_len = bad_words_list.shape[2]
             bad_words_lens = torch.full((batch_size, ),
                                         max_bad_words_len,
@@ -3411,7 +3443,7 @@ class GenerationSession(object):
             bad_words_list_ptrs = torch.zeros((batch_size), dtype=torch.int64)
             for bi in range(batch_size):
                 bad_words_list_ptrs[bi] = bad_words_list.data_ptr(
-                ) + bi * 2 * max_bad_words_len
+                ) + bi * 2 * max_bad_words_len * bad_words_list.element_size()
             bad_words_list_ptrs = bad_words_list_ptrs.to('cuda')
         bad_words_data = (bad_words_list_ptrs, bad_words_lens,
                           max_bad_words_len)
@@ -3424,9 +3456,9 @@ class GenerationSession(object):
                 cache_indirections, input_ids, hidden_states,
                 prompt_embedding_table, tasks, prompt_vocab_size, ite,
                 sequence_limit_lengths, stop_words_data, bad_words_data,
-                no_repeat_ngram_size, output_sequence_lengths, return_dict,
-                encoder_output, encoder_input_lengths, stopping_criteria,
-                logits_processor, cross_attention_mask, **kwargs)
+                output_sequence_lengths, return_dict, encoder_output,
+                encoder_input_lengths, stopping_criteria, logits_processor,
+                cross_attention_mask, **kwargs)
         else:
             return self.decode_regular(
                 batch_size, scfg, sequence_lengths, context_lengths,
@@ -3434,9 +3466,9 @@ class GenerationSession(object):
                 cache_indirections, input_ids, hidden_states,
                 prompt_embedding_table, tasks, prompt_vocab_size, ite,
                 sequence_limit_lengths, stop_words_data, bad_words_data,
-                no_repeat_ngram_size, output_sequence_lengths, return_dict,
-                encoder_output, encoder_input_lengths, stopping_criteria,
-                logits_processor, cross_attention_mask, **kwargs)
+                output_sequence_lengths, return_dict, encoder_output,
+                encoder_input_lengths, stopping_criteria, logits_processor,
+                cross_attention_mask, **kwargs)
 
 
 class ChatGLMGenerationSession(GenerationSession):
@@ -3487,6 +3519,34 @@ class ChatGLMGenerationSession(GenerationSession):
                 position_ids[1, input_lengths_acc[i + 1] - 1] = 1
             position_ids = position_ids.int().cuda()
             last_token_ids = torch.cumsum(last_token_ids, dim=0).int().cuda()
+
+            # specialization for GLM series models
+            if kwargs["pad_id"] in [50256, 50259]:
+                if kwargs["pad_id"] == 50256:  # glm_2b / glm_10b
+                    mask_ids = [50260, 50264, 50263]
+                else:  # glm_10b_chinese / glm_large_chinese
+                    mask_ids = [50003, 50008, 50009]
+
+                self.mask_index_tensor = \
+                    torch.zeros([batch_size], dtype=torch.int32)
+                position_ids = position_ids.cpu()
+                for i in range(batch_size):
+                    length = context_lengths[i]
+                    input_ids = kwargs["input_ids"][
+                        0:context_lengths[i]] if i == 0 else kwargs[
+                            "input_ids"][sum(context_lengths[0:i]
+                                             ):sum(context_lengths[0:i]) +
+                                         length]
+                    mask_index = [
+                        torch.where(input_ids == id)[0].int() for id in mask_ids
+                    ]
+                    tail_index = torch.Tensor([max_context_length]).int().cuda()
+                    mask_index.append(tail_index)
+                    mask_index = torch.cat(mask_index, dim=0).min()
+                    self.mask_index_tensor[i] = int(mask_index)
+                    position_ids[0][sum(context_lengths[0:i + 1]) -
+                                    1] = int(mask_index)
+                position_ids = position_ids.cuda()
         else:
             position_ids = torch.zeros([batch_size, 2, max_context_length],
                                        dtype=torch.int32)
@@ -3557,6 +3617,12 @@ class ChatGLMGenerationSession(GenerationSession):
             position_ids = _tile_beam_width_chatglm(position_ids, num_beams)
             position_ids = position_ids.int().cuda()
             last_token_ids = torch.cumsum(last_token_ids, dim=0).int().cuda()
+
+            if self.mask_index_tensor is not None:  # specialization for GLM series models
+                position_ids = position_ids.cpu()
+                for i in range(batch_size):
+                    position_ids[0][i] = self.mask_index_tensor[i]
+            position_ids = position_ids.cuda()
         else:
             data = []
             if self.mask_index_tensor is not None:  # specialization for GLM series models

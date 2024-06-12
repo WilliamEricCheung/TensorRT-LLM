@@ -14,8 +14,8 @@ from tensorrt_llm import Mapping
 from tensorrt_llm._utils import mpi_barrier
 from tensorrt_llm.auto_parallel import AutoParallelConfig, infer_cluster_config
 from tensorrt_llm.builder import BuildConfig, build
-from tensorrt_llm.executor import GenerationExecutorWorker
-from tensorrt_llm.hlapi.utils import SamplingConfig, print_traceback_on_error
+from tensorrt_llm.executor import ExecutorBindingsWorker
+from tensorrt_llm.hlapi.utils import SamplingParams, print_traceback_on_error
 from tensorrt_llm.models import LLaMAForCausalLM
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -99,13 +99,13 @@ def build_and_run_tp2(rank, model_name, engine_dir, use_auto_parallel):
     engine.save(engine_dir)
     mpi_barrier()
     tensorrt_llm.logger.warning(f"Build finished for rank {rank}")
-    with GenerationExecutorWorker(engine_dir, tokenizer_dir) as executor:
+    with ExecutorBindingsWorker(engine_dir, tokenizer_dir) as executor:
         executor.block_subordinates()
 
         for idx, output in enumerate(
                 executor.generate(
                     input_text,
-                    sampling_config=SamplingConfig(max_new_tokens=10))):
+                    sampling_params=SamplingParams(max_new_tokens=10))):
             tensorrt_llm.logger.info(f"{rank} input: {input_text[idx]}")
             tensorrt_llm.logger.info(f"{rank} output: {output.text}")
             assert output.text.endswith(

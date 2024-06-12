@@ -13,7 +13,6 @@ import numpy as np
 import safetensors
 import torch
 import torch.nn as nn
-from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from transformers.pytorch_utils import Conv1D
@@ -22,6 +21,7 @@ import tensorrt_llm
 from tensorrt_llm._utils import release_gc
 from tensorrt_llm.layers import MoeConfig
 from tensorrt_llm.mapping import Mapping
+from tensorrt_llm.models.convert_utils import load_calib_dataset
 from tensorrt_llm.quantization import QuantAlgo
 
 
@@ -52,6 +52,13 @@ def parse_arguments():
         'By default, we use a single static scaling factor for the GEMM\'s result. '
         'per_channel instead uses a different static scaling factor for each channel. '
         'The latter is usually more accurate, but a little slower.')
+    parser.add_argument(
+        '--calib_dataset',
+        type=str,
+        default='ccdv/cnn_dailymail',
+        help=
+        "The huggingface dataset name or the local directory of the dataset for calibration."
+    )
     parser.add_argument("--dataset_cache_dir",
                         type=str,
                         default=None,
@@ -331,8 +338,8 @@ def capture_activation_range(model,
                     functools.partial(stat_input_hook, name=name)))
 
     for i in tqdm(range(num_samples), desc="calibrating model"):
-        datapoint = dataset['train'][i:i + 1]
-        line = copy.copy(datapoint['article'])
+        datapoint = dataset[i:i + 1]
+        line = copy.copy(datapoint)
         line[0] = line[0] + ' TL;DR: '
         line[0] = line[0].strip()
         line[0] = line[0].replace(" n't", "n't")
@@ -673,11 +680,16 @@ if __name__ == '__main__':
         'rotary_base': args.rotary_base,
         'rotary_scaling': args.rotary_scaling,
         'quantization': {
-            'quant_algo': quant_algo,
-            'kv_cache_quant_algo': kv_cache_quant_algo,
-            'exclude_modules': ['lm_head'],
+            'quant_algo':
+            quant_algo,
+            'kv_cache_quant_algo':
+            kv_cache_quant_algo,
+            'exclude_modules': [
+                'lm_head', 'vocab_embedding', 'position_embedding',
+                'block_embedding'
+            ],
         },
-        'moe_config': {
+        'moe': {
             "num_experts": args.moe_num_experts,
             "top_k": args.moe_top_k,
             "tp_mode": args.moe_tp_mode,
@@ -689,10 +701,6 @@ if __name__ == '__main__':
             'pp_size': args.pp_size,
         },
         'clip_qkv': args.clip_qkv,
-        'moe_num_experts': args.moe_num_experts,
-        'moe_top_k': args.moe_top_k,
-        'moe_tp_mode': args.moe_tp_mode,
-        'moe_normalization_mode': args.moe_renorm_mode,
         'dense_context_fmha': args.dense_context_fmha,
     }
 
@@ -720,14 +728,12 @@ if __name__ == '__main__':
                           pp_size=args.pp_size)
         act_range = {}
         if args.int8_kv_cache:
-            dataset = load_dataset("ccdv/cnn_dailymail",
-                                   '3.0.0',
-                                   cache_dir=args.dataset_cache_dir)
-            act_range = capture_activation_range(
-                hf_model,
-                AutoTokenizer.from_pretrained(args.model_dir,
-                                              padding_side='left',
-                                              trust_remote_code=True), dataset)
+            tokenizer = AutoTokenizer.from_pretrained(args.model_dir,
+                                                      padding_side='left',
+                                                      trust_remote_code=True)
+            dataset = load_calib_dataset(args.calib_dataset,
+                                         cache_dir=args.dataset_cache_dir)
+            act_range = capture_activation_range(hf_model, tokenizer, dataset)
 
         hf_model = dict(hf_model.named_parameters())
         weights = convert_hf_dbrx(

@@ -15,8 +15,7 @@ In addition, there are two shared files in the parent folder [`examples`](../) f
 
 ## Support Matrix
   * FP16/BF16
-  * Checkpoint type: Jax, Torch, Keras, Huggingface (HF)
-  * python runtime
+  * Checkpoint type: Jax, Huggingface (HF)
 
 ## Usage
 
@@ -153,6 +152,7 @@ Note that we need to download the dataset of MMLU first and the evaluation of MM
 TOKENIZER_DIR_2B_PATH=./recurrentgemma_model/recurrentgemma-2b
 python3 ../run.py --max_output_len=100 \
                   --use_py_session \
+                  --max_attention_window_size 2048 \
                   --tokenizer_dir ${TOKENIZER_DIR_2B_PATH} \
                   --engine_dir ${ENGINE_2B_PATH}
 
@@ -160,6 +160,7 @@ python3 ../run.py --max_output_len=100 \
 TOKENIZER_DIR_2B_IT_PATH=./recurrentgemma_model/recurrentgemma-2b-it
 python3 ../run.py --max_output_len=100 \
                   --use_py_session \
+                  --max_attention_window_size 2048 \
                   --tokenizer_dir ${TOKENIZER_DIR_2B_IT_PATH} \
                   --engine_dir ${ENGINE_2B_IT_PATH}
 
@@ -167,6 +168,7 @@ python3 ../run.py --max_output_len=100 \
 VOCAB_FILE_2B_FLAX_PATH=./recurrentgemma_model/recurrentgemma-2b-flax/tokenizer.model
 python3 ../run.py --max_output_len=100 \
                   --use_py_session \
+                  --max_attention_window_size 2048 \
                   --vocab_file ${VOCAB_FILE_2B_FLAX_PATH} \
                   --engine_dir ${ENGINE_2B_FLAX_PATH}
 
@@ -174,6 +176,7 @@ python3 ../run.py --max_output_len=100 \
 VOCAB_FILE_2B_IT_FLAX_PATH=./recurrentgemma_model/recurrentgemma-2b-it-flax/tokenizer.model
 python3 ../run.py --max_output_len=100 \
                   --use_py_session \
+                  --max_attention_window_size 2048 \
                   --vocab_file ${VOCAB_FILE_2B_IT_FLAX_PATH} \
                   --engine_dir ${ENGINE_2B_IT_FLAX_PATH}
 ```
@@ -186,6 +189,7 @@ python3 ../summarize.py --test_trt_llm \
                         --use_py_session \
                         --engine_dir ${ENGINE_2B_PATH} \
                         --batch_size 8 \
+                        --max_attention_window_size 2048 \
                         --tokenizer_dir ${TOKENIZER_DIR_2B_PATH}
 
 # recurrentgemma-2b-it
@@ -193,6 +197,7 @@ python3 ../summarize.py --test_trt_llm \
                         --use_py_session \
                         --engine_dir ${ENGINE_2B_IT_PATH} \
                         --batch_size 8 \
+                        --max_attention_window_size 2048 \
                         --tokenizer_dir ${TOKENIZER_DIR_2B_IT_PATH}
 
 # recurrentgemma-2b-flax
@@ -200,6 +205,7 @@ python3 ../summarize.py --test_trt_llm \
                         --use_py_session \
                         --engine_dir ${ENGINE_2B_FLAX_PATH} \
                         --batch_size 8 \
+                        --max_attention_window_size 2048 \
                         --vocab_file ${VOCAB_FILE_2B_FLAX_PATH}
 
 # recurrentgemma-2b-it-flax
@@ -207,6 +213,7 @@ python3 ../summarize.py --test_trt_llm \
                         --use_py_session \
                         --engine_dir ${ENGINE_2B_IT_FLAX_PATH} \
                         --batch_size 8 \
+                        --max_attention_window_size 2048 \
                         --vocab_file ${VOCAB_FILE_2B_IT_FLAX_PATH}
 ```
 
@@ -226,21 +233,25 @@ Evaluate on MMLU dataset.
 ```bash
 # recurrentgemma-2b
 python3 ../mmlu.py --test_trt_llm \
+                   --max_attention_window_size 2048 \
                    --tokenizer_dir ${TOKENIZER_DIR_2B_PATH} \
                    --engine_dir ${ENGINE_2B_PATH}
 
 # recurrentgemma-2b-it
 python3 ../mmlu.py --test_trt_llm \
+                   --max_attention_window_size 2048 \
                    --tokenizer_dir ${TOKENIZER_DIR_2B_IT_PATH} \
                    --engine_dir ${ENGINE_2B_IT_PATH}
 
 # recurrentgemma-2b-flax
 python3 ../mmlu.py --test_trt_llm \
+                   --max_attention_window_size 2048 \
                    --vocab_file ${VOCAB_FILE_2B_FLAX_PATH} \
                    --engine_dir ${ENGINE_2B_FLAX_PATH}
 
 # recurrentgemma-2b-it-flax
 python3 ../mmlu.py --test_trt_llm \
+                   --max_attention_window_size 2048 \
                    --vocab_file ${VOCAB_FILE_2B_IT_FLAX_PATH} \
                    --engine_dir ${ENGINE_2B_IT_FLAX_PATH}
 ```
